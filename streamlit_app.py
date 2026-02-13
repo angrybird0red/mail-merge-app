@@ -68,29 +68,64 @@ def load_creds(email):
     return None
     
 def get_jd_html(creds, doc_id):
-    """Exports Google Doc as HTML and fixes the 'Big Ass Line Break' issue."""
+    """Exports Google Doc as HTML and aggressively fixes spacing issues."""
     drive_service = build('drive', 'v3', credentials=creds)
     html_content = drive_service.files().export(fileId=doc_id, mimeType='text/html').execute()
     decoded_html = html_content.decode('utf-8')
     
-    # --- CSS HACK: TIGHTEN SPACING ---
-    # We inject styles to override Google's huge default margins.
-    # 'margin: 0' kills the space, 'margin-bottom: 0.8em' gives a nice standard gap.
+    # --- CSS HACK V2: THE NUCLEAR OPTION ---
+    # 1. 'li p' targets paragraphs INSIDE lists to kill their gap.
+    # 2. 'line-height: 1.4' tightens the vertical rhythm.
+    # 3. 'margin-bottom: 0' on list items prevents double spacing.
     style_fix = """
     <style>
-        body { font-family: Arial, sans-serif; font-size: 14px; line-height: 1.5; color: #000000; }
-        p { margin-top: 0 !important; margin-bottom: 10px !important; padding: 0; }
-        ul, ol { margin-top: 0 !important; margin-bottom: 10px !important; padding-left: 20px; }
-        li { margin-bottom: 5px !important; }
-        h1, h2, h3 { margin-top: 20px !important; margin-bottom: 10px !important; }
+        body { 
+            font-family: Arial, Helvetica, sans-serif !important; 
+            font-size: 11pt !important; 
+            line-height: 1.4 !important; 
+            color: #000000 !important;
+            background-color: transparent !important;
+        }
+        
+        /* Standard Paragraphs (Normal Text) */
+        p { 
+            margin-top: 0 !important; 
+            margin-bottom: 12px !important; 
+            padding: 0 !important;
+        }
+
+        /* Lists */
+        ul, ol { 
+            margin-top: 0 !important; 
+            margin-bottom: 12px !important; 
+            padding-left: 30px !important; 
+        }
+        
+        /* List Items */
+        li { 
+            margin-bottom: 2px !important; /* Tiny gap between bullets */
+            margin-top: 0 !important;
+        }
+        
+        /* CRITICAL FIX: Kill margins for paragraphs sitting inside lists */
+        li p { 
+            margin: 0 !important; 
+            padding: 0 !important; 
+            display: inline !important; /* Forces text to sit on one line */
+        }
+        
+        /* Headings */
+        h1, h2, h3, h4 { 
+            margin-top: 18px !important; 
+            margin-bottom: 8px !important; 
+            font-weight: bold !important;
+        }
     </style>
     """
     
-    # Inject our style fix right before the body content starts
-    if "<head>" in decoded_html:
-        clean_html = decoded_html.replace("</head>", style_fix + "</head>")
-    else:
-        clean_html = style_fix + decoded_html
+    # Prepend style to the body. This is safer than replacing </head> 
+    # because sometimes Google export skips the head tag.
+    clean_html = style_fix + decoded_html
 
     docs_service = build('docs', 'v1', credentials=creds)
     doc = docs_service.documents().get(documentId=doc_id).execute()
