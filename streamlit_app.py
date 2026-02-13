@@ -101,7 +101,7 @@ with tab2:
         try:
             flow = Flow.from_client_config(
                 get_client_config(), SCOPES, 
-                redirect_uri="https://lalith-mail-merge.streamlit.app"
+                redirect_uri="https://mail-merge-app-xuxkqmkhigxrnyoeftbfif.streamlit.app/"
             )
             flow.fetch_token(code=code)
             creds = flow.credentials
