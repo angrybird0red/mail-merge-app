@@ -16,8 +16,14 @@ from google.auth.transport.requests import Request
 
 st.set_page_config(page_title="Mail Merge Elite V4", page_icon="👔", layout="wide")
 
-# --- 1. CORE LOGIC ---
-SCOPES = ['https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/documents.readonly', 'https://www.googleapis.com/auth/spreadsheets']
+# --- 1. UPDATED CORE LOGIC ---
+# ADD 'https://www.googleapis.com/auth/drive.readonly' to your SCOPES at the top
+SCOPES = [
+    'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/documents.readonly',
+    'https://www.googleapis.com/auth/drive.readonly', # Required for HTML export
+    'https://www.googleapis.com/auth/spreadsheets'
+]
 
 def get_client_config():
     return json.loads(st.secrets["gcp_service_account"])
@@ -33,12 +39,17 @@ def load_creds(email):
         return creds
     return None
 
-def get_jd(creds, doc_id):
-    docs = build('docs', 'v1', credentials=creds)
-    doc = docs.documents().get(documentId=doc_id).execute()
-    title = doc.get('title')
-    text = "".join([e['textRun'].get('content', '') for elem in doc.get('body', {}).get('content', []) if 'paragraph' in elem for e in elem['paragraph']['elements'] if 'textRun' in e])
-    return title, text
+def get_jd_html(creds, doc_id):
+    """Exports Google Doc as HTML to preserve 1:1 formatting."""
+    # Use Drive API for exporting
+    drive_service = build('drive', 'v3', credentials=creds)
+    # This export method keeps your bolding, tables, and spacing intact
+    html_content = drive_service.files().export(fileId=doc_id, mimeType='text/html').execute()
+    
+    # Get the title separately using Docs API
+    docs_service = build('docs', 'v1', credentials=creds)
+    doc = docs_service.documents().get(documentId=doc_id).execute()
+    return doc.get('title'), html_content.decode('utf-8')
 
 def get_full_sheet_data(creds, sheet_id, sheet_name):
     try:
@@ -47,16 +58,22 @@ def get_full_sheet_data(creds, sheet_id, sheet_name):
         return res.get('values', []) if res.get('values') else []
     except: return []
 
-def send_mail(creds, sender, to, subject, body, display_name):
+def send_mail_html(creds, sender, to, subject, html_body, display_name):
+    """Sends a professional HTML-formatted email."""
     service = build('gmail', 'v1', credentials=creds)
     msg = EmailMessage()
-    msg.set_content(body)
+    
+    # CRITICAL: We set the subtype to 'html' so Gmail renders the formatting
+    msg.add_header('Content-Type', 'text/html')
+    msg.set_payload(html_body)
+    
     msg['To'] = to
     msg['From'] = formataddr((display_name, sender))
     msg['Subject'] = subject
+    
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     service.users().messages().send(userId="me", body={'raw': raw}).execute()
-
+    
 # --- 2. SESSION STATE ---
 if 'stop_clicked' not in st.session_state: st.session_state.stop_clicked = False
 
@@ -159,14 +176,15 @@ with tab_run:
                     role = row[2] if len(row) > 2 else "the open position"
                     fname = target.split('@')[0].split('.')[0].capitalize()
                     
-                    final_body = body_tmpl.replace("{first_name}", fname).replace("{company}", comp).replace("{job_title}", role)
+                    final_body = body_template.replace("{first_name}", fname).replace("{company}", comp).replace("{job_title}", role)
                     
                     dashboard_df.at[s["email"], "Target"] = target
                     dashboard_df.at[s["email"], "Status"] = "📨 Sending..."
                     table_ui.dataframe(dashboard_df, use_container_width=True)
 
                     try:
-                        if not is_dry: send_mail(s["creds"], s["email"], target, subj, final_body, st.secrets["DISPLAY_NAME"])
+                        if not is_dry:
+                            send_mail_html(s["creds"], s["email"], target, subj, final_body, st.secrets["DISPLAY_NAME"])
                         s["idx"] += 1
                         sent_total += 1
                         dashboard_df.at[s["email"], "Sent"] = s["idx"]
