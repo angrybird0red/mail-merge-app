@@ -119,7 +119,7 @@ with tab_auth:
                 url, _ = flow.authorization_url(prompt='consent', state=email)
                 st.link_button("👉 Sign In", url)
 
-# --- TAB 1: OPERATIONS CENTER (FIXED DASHBOARD) ---
+# --- TAB 1: OPERATIONS CENTER (ROUND ROBIN) ---
 with tab_run:
     # Load Configs
     DOC_ID = st.secrets.get("DOC_ID")
@@ -136,7 +136,7 @@ with tab_run:
             selected_accounts = st.multiselect("Select Senders", all_accounts, default=all_accounts)
         with c2:
             limit = st.number_input("Max Emails per Account", 1, 500, 20)
-            delay = st.number_input("Delay (seconds)", 5, 120, 20)
+            delay = st.number_input("Delay (seconds) - applied after each round", 5, 300, 20)
         with c3:
             st.write("**Safety Mode**")
             is_dry_run = st.toggle("🧪 Dry Run (Test Mode)", value=True)
@@ -149,57 +149,74 @@ with tab_run:
     st.divider()
     if st.button("🔥 START CAMPAIGN", type="primary", disabled=not selected_accounts):
         
-        # --- A. INITIALIZE DASHBOARD (The Fix) ---
-        # Create a dictionary for the dashboard state
+        # --- A. INITIALIZE DASHBOARD & PRE-LOAD DATA ---
         dashboard_data = []
-        for sender in selected_accounts:
-            # Find which filter number this account maps to
-            original_idx = all_accounts.index(sender)
-            dashboard_data.append({
-                "Filter": f"Filter {original_idx}",
-                "Account": sender,
-                "Target Email": "Waiting...",
-                "Sent": 0,
-                "Errors": 0,
-                "Status": "Ready"
-            })
+        active_senders = []
         
-        # Create the DataFrame and the empty container
+        # Pre-load credentials and target lists to avoid API lag during sending
+        with st.status("📋 Preparing Campaign...", expanded=True) as status:
+            for sender in selected_accounts:
+                st.write(f"Loading data for {sender}...")
+                original_idx = all_accounts.index(sender)
+                
+                # Default dashboard row
+                row = {
+                    "Filter": f"Filter {original_idx}",
+                    "Account": sender,
+                    "Target Email": "Waiting...",
+                    "Sent": 0,
+                    "Errors": 0,
+                    "Status": "Ready"
+                }
+                dashboard_data.append(row)
+                
+                creds = load_creds(sender)
+                if creds:
+                    targets = get_sheet_col(creds, SHEET_ID, f"filter{original_idx}")
+                    active_senders.append({
+                        "email": sender,
+                        "creds": creds,
+                        "targets": targets,
+                        "idx": 0 # Track how many this sender has sent
+                    })
+                else:
+                    # Mark as failed in dashboard immediately
+                    for r in dashboard_data:
+                        if r["Account"] == sender: r["Status"] = "❌ Auth Failed"
+
+            try:
+                # Get JD Template (once)
+                admin_creds = load_creds(all_accounts[0])
+                subject, body_template = get_jd(admin_creds, DOC_ID)
+                status.update(label="✅ Ready to Launch!", state="complete", expanded=False)
+            except Exception as e:
+                st.error(f"Failed to load Template: {e}")
+                st.stop()
+
+        # Create DataFrame & UI Element
         dashboard_df = pd.DataFrame(dashboard_data).set_index("Account")
         table_placeholder = st.empty()
         table_placeholder.dataframe(dashboard_df, use_container_width=True)
         
-        try:
-            # Get JD
-            admin_creds = load_creds(all_accounts[0])
-            subject, body_template = get_jd(admin_creds, DOC_ID)
+        # --- B. ROUND ROBIN LOOP ---
+        # We loop from 0 to LIMIT. In each iteration, every account sends 1 email.
+        for round_num in range(limit):
             
-            # --- B. PROCESSING LOOP ---
-            for sender in selected_accounts:
-                original_index = all_accounts.index(sender)
+            emails_sent_this_round = 0
+            
+            # 1. Send one email from EACH active sender
+            for sender_obj in active_senders:
+                sender_email = sender_obj["email"]
+                current_idx = sender_obj["idx"]
+                targets = sender_obj["targets"]
                 
-                # Update Status: Starting
-                dashboard_df.at[sender, "Status"] = "🚀 Starting..."
-                table_placeholder.dataframe(dashboard_df, use_container_width=True)
-                
-                creds = load_creds(sender)
-                if not creds:
-                    dashboard_df.at[sender, "Status"] = "❌ Auth Failed"
-                    table_placeholder.dataframe(dashboard_df, use_container_width=True)
-                    continue
-                
-                # Fetch targets
-                targets = get_sheet_col(creds, SHEET_ID, f"filter{original_index}")
-                
-                count = 0
-                for target in targets:
-                    if count >= limit: 
-                        dashboard_df.at[sender, "Status"] = "⏹️ Limit Reached"
-                        break
+                # Check if this sender still has targets and hasn't hit limit
+                if current_idx < len(targets):
+                    target = targets[current_idx]
                     
-                    # Update Target Column
-                    dashboard_df.at[sender, "Target Email"] = target
-                    dashboard_df.at[sender, "Status"] = "Processing..."
+                    # Update Dashboard: "Processing..."
+                    dashboard_df.at[sender_email, "Target Email"] = target
+                    dashboard_df.at[sender_email, "Status"] = "🚀 Sending..."
                     table_placeholder.dataframe(dashboard_df, use_container_width=True)
                     
                     # Personalize
@@ -208,30 +225,33 @@ with tab_run:
                     
                     try:
                         if is_dry_run:
-                            # SIMULATION
-                            time.sleep(0.5) 
+                            time.sleep(0.5) # Fake send time
                         else:
-                            # REAL SEND
-                            send_mail(creds, sender, target, subject, final_body, DISPLAY_NAME)
-                            log_send(creds, SHEET_ID, [target, subject, sender, str(datetime.now())])
-                            time.sleep(delay)
+                            send_mail(sender_obj["creds"], sender_email, target, subject, final_body, DISPLAY_NAME)
+                            log_send(sender_obj["creds"], SHEET_ID, [target, subject, sender_email, str(datetime.now())])
                         
-                        # Update Counts
-                        count += 1
-                        dashboard_df.at[sender, "Sent"] = count
-                        dashboard_df.at[sender, "Status"] = "✅ Sent"
+                        # Success Update
+                        sender_obj["idx"] += 1
+                        dashboard_df.at[sender_email, "Sent"] = sender_obj["idx"]
+                        dashboard_df.at[sender_email, "Status"] = f"✅ Sent ({round_num + 1})"
+                        emails_sent_this_round += 1
                         
                     except Exception as e:
-                        dashboard_df.at[sender, "Errors"] += 1
-                        dashboard_df.at[sender, "Status"] = f"❌ Error"
+                        dashboard_df.at[sender_email, "Errors"] += 1
+                        dashboard_df.at[sender_email, "Status"] = "❌ Error"
                     
-                    # Refresh Table
+                    # Small buffer between ACCOUNTS (to prevent API burst)
+                    time.sleep(1) 
                     table_placeholder.dataframe(dashboard_df, use_container_width=True)
-
-                dashboard_df.at[sender, "Status"] = "✨ Done"
+            
+            # 2. End of Round Check
+            if emails_sent_this_round == 0:
+                break # Everyone ran out of targets
+                
+            # 3. THE BIG DELAY (Waits after the WHOLE batch is done)
+            if round_num < limit - 1: # Don't wait after the very last round
+                dashboard_df["Status"] = dashboard_df["Status"].apply(lambda x: f"⏳ Waiting {delay}s..." if "Sent" in str(x) else x)
                 table_placeholder.dataframe(dashboard_df, use_container_width=True)
-            
-            st.success("Batch Run Completed!")
-            
-        except Exception as e:
-            st.error(f"Critical Error: {e}")
+                time.sleep(delay)
+
+        st.success("Batch Run Completed!")
