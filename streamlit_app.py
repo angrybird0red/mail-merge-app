@@ -123,7 +123,7 @@ with tab2:
             if col2.button("Login", key=email):
                 flow = Flow.from_client_config(
                     get_client_config(), SCOPES, 
-                    redirect_uri="https://lalith-mail-merge.streamlit.app"
+                    redirect_uri="https://mail-merge-app-xuxkqmkhigxrnyoeftbfif.streamlit.app"
                 )
                 url, _ = flow.authorization_url(prompt='consent', state=email)
                 st.link_button("Go to Google", url)
