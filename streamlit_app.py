@@ -164,7 +164,7 @@ def send_mail_html(creds, sender, to, subject, html_body, display_name):
     service.users().messages().send(userId="me", body={'raw': raw}).execute()
 
 # --- 2. UI SETUP ---
-st.title("👔 Mail Merge Elite V5")
+st.title("👔 Simple Merge")
 
 # [[[ CHECK FOR LOGIN SUCCESS AT THE VERY TOP ]]]
 if "code" in st.query_params:
