@@ -14,14 +14,14 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 
-st.set_page_config(page_title="Mail Merge Elite V4", page_icon="👔", layout="wide")
+st.set_page_config(page_title="Mail Merge Elite V5", page_icon="👔", layout="wide")
 
-# --- 1. UPDATED CORE LOGIC ---
-# ADD 'https://www.googleapis.com/auth/drive.readonly' to your SCOPES at the top
+# --- 1. CORE LOGIC (FORMATTING FIX) ---
+# We use Drive API for HTML export to keep 1:1 formatting
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.send',
     'https://www.googleapis.com/auth/documents.readonly',
-    'https://www.googleapis.com/auth/drive.readonly', # Required for HTML export
+    'https://www.googleapis.com/auth/drive.readonly', 
     'https://www.googleapis.com/auth/spreadsheets'
 ]
 
@@ -41,12 +41,9 @@ def load_creds(email):
 
 def get_jd_html(creds, doc_id):
     """Exports Google Doc as HTML to preserve 1:1 formatting."""
-    # Use Drive API for exporting
     drive_service = build('drive', 'v3', credentials=creds)
-    # This export method keeps your bolding, tables, and spacing intact
     html_content = drive_service.files().export(fileId=doc_id, mimeType='text/html').execute()
     
-    # Get the title separately using Docs API
     docs_service = build('docs', 'v1', credentials=creds)
     doc = docs_service.documents().get(documentId=doc_id).execute()
     return doc.get('title'), html_content.decode('utf-8')
@@ -63,7 +60,7 @@ def send_mail_html(creds, sender, to, subject, html_body, display_name):
     service = build('gmail', 'v1', credentials=creds)
     msg = EmailMessage()
     
-    # CRITICAL: We set the subtype to 'html' so Gmail renders the formatting
+    # Set the content subtype to 'html' to render bold/line breaks
     msg.add_header('Content-Type', 'text/html')
     msg.set_payload(html_body)
     
@@ -73,12 +70,12 @@ def send_mail_html(creds, sender, to, subject, html_body, display_name):
     
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     service.users().messages().send(userId="me", body={'raw': raw}).execute()
-    
+
 # --- 2. SESSION STATE ---
 if 'stop_clicked' not in st.session_state: st.session_state.stop_clicked = False
 
 # --- 3. UI TABS ---
-st.title("👔 Mail Merge Elite V4")
+st.title("👔 Mail Merge Elite V5")
 tab_run, tab_preview, tab_auth = st.tabs(["⚡ Operations", "👁️ Preview", "⚙️ Accounts"])
 
 # --- TAB: ACCOUNTS ---
@@ -86,7 +83,6 @@ with tab_auth:
     st.subheader("Account Authorization")
     accounts = json.loads(st.secrets.get("DUMMY_ACCOUNTS", "[]"))
     
-    # 1. HANDLE REDIRECT LOGIN (Success Screen)
     if "code" in st.query_params:
         code, email_trying = st.query_params["code"], st.query_params.get("state")
         try:
@@ -95,17 +91,15 @@ with tab_auth:
             flow.fetch_token(code=code)
             st.success(f"✅ Success for {email_trying}")
             st.code(flow.credentials.to_json(), language="json")
-            st.info(f"Copy/Paste above into Secrets as `TOKEN_{email_trying.replace('@','_').replace('.','_').upper()}`")
+            st.info(f"Copy/Paste into Secrets as `TOKEN_{email_trying.replace('@','_').replace('.','_').upper()}`")
         except Exception as e: st.error(str(e))
 
-    # 2. SHOW ALL ACCOUNTS & LOGIN BUTTONS
     for email in accounts:
         col1, col2 = st.columns([3, 1])
         creds = load_creds(email)
         status = "✅ Ready" if creds else "❌ Disconnected"
         col1.write(f"**{email}** : {status}")
-        
-        if not creds: # ALWAYS show login button if not connected
+        if not creds:
             if col2.button("Login", key=f"login_{email}"):
                 redirect_uri = "https://mail-merge-app-angrybird0red.streamlit.app"
                 flow = Flow.from_client_config(get_client_config(), SCOPES, redirect_uri=redirect_uri)
@@ -117,11 +111,15 @@ with tab_preview:
     admin_email = json.loads(st.secrets["DUMMY_ACCOUNTS"])[0]
     creds = load_creds(admin_email)
     if creds:
-        subj, body = get_jd(creds, st.secrets["DOC_ID"])
-        st.info(f"📄 Template: {subj}")
-        st.markdown("**Example Personalization:**")
-        preview = body.replace("{first_name}", "John").replace("{company}", "TechCorp").replace("{job_title}", "Analyst")
-        st.text_area("", preview, height=300)
+        try:
+            subj, html_body = get_jd_html(creds, st.secrets["DOC_ID"])
+            st.info(f"📄 Template: {subj}")
+            st.markdown("**Personalized Preview (with HTML formatting):**")
+            # Replace tags in the HTML string
+            preview_html = html_body.replace("{first_name}", "John").replace("{company}", "TechCorp").replace("{job_title}", "Analyst")
+            # Render the HTML in Streamlit for preview
+            st.html(preview_html)
+        except Exception as e: st.error(f"Could not load preview: {e}")
     else: st.warning("Connect your first account to preview.")
 
 # --- TAB: OPERATIONS ---
@@ -143,7 +141,7 @@ with tab_run:
         active_data = []
         with st.status("🔍 Checking System...") as status:
             admin_creds = load_creds(all_acc[0])
-            subj, body_tmpl = get_jd(admin_creds, st.secrets["DOC_ID"])
+            subj, body_tmpl = get_jd_html(admin_creds, st.secrets["DOC_ID"])
             for s in sel_acc:
                 c = load_creds(s)
                 if c:
@@ -158,48 +156,43 @@ with tab_run:
         total_goal = sum([min(len(s["rows"]), limit) for s in active_data])
         sent_total = 0
 
-        # --- ROUND ROBIN EXECUTION ---
         for r_num in range(limit):
-            if st.session_state.stop_clicked:
-                st.error("🛑 Stop button pressed. Terminating campaign...")
-                break
+            if st.session_state.stop_clicked: break
             
             round_active = False
             for s in active_data:
                 if s["idx"] < len(s["rows"]):
                     round_active = True
-                    row = s["rows"][s[ "idx"]]
+                    row = s["rows"][s["idx"]]
                     target = row[0]
-                    
-                    # Mapping Variables
                     comp = row[1] if len(row) > 1 else "Your Company"
                     role = row[2] if len(row) > 2 else "the open position"
                     fname = target.split('@')[0].split('.')[0].capitalize()
                     
-                    final_body = body_template.replace("{first_name}", fname).replace("{company}", comp).replace("{job_title}", role)
+                    # The formatting fix:
+                    final_body = body_tmpl.replace("{first_name}", fname).replace("{company}", comp).replace("{job_title}", role)
                     
                     dashboard_df.at[s["email"], "Target"] = target
                     dashboard_df.at[s["email"], "Status"] = "📨 Sending..."
                     table_ui.dataframe(dashboard_df, use_container_width=True)
 
                     try:
-                        if not is_dry:
-                            send_mail_html(s["creds"], s["email"], target, subj, final_body, st.secrets["DISPLAY_NAME"])
+                        if not is_dry: send_mail_html(s["creds"], s["email"], target, subj, final_body, st.secrets["DISPLAY_NAME"])
                         s["idx"] += 1
                         sent_total += 1
                         dashboard_df.at[s["email"], "Sent"] = s["idx"]
                         dashboard_df.at[s["email"], "Status"] = "✅ Sent"
-                    except: dashboard_df.at[s["email"], "Status"] = "❌ Error"
+                    except Exception as e:
+                        dashboard_df.at[s["email"], "Status"] = f"❌ Error"
                     
-                    time.sleep(1) # Tiny delay between accounts
+                    time.sleep(1)
                     table_ui.dataframe(dashboard_df, use_container_width=True)
                     prog_bar.progress(sent_total/total_goal, text=f"Sent {sent_total} / {total_goal}")
 
             if not round_active: break
             
-            # THE COUNTDOWN
             if r_num < limit - 1:
-                human_delay = delay + random.randint(-2, 2) # HUMAN-LIKE RANDOMIZATION
+                human_delay = delay + random.randint(-2, 2)
                 for sec in range(human_delay, 0, -1):
                     if st.session_state.stop_clicked: break
                     for s in active_data: dashboard_df.at[s["email"], "Status"] = f"⏳ {sec}s"
