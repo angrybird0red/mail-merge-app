@@ -13,7 +13,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 
-st.set_page_config(page_title="Mail Merge App", page_icon="📨")
+st.set_page_config(page_title="Mail Merge Pro", page_icon="🚀", layout="wide")
 
 # --- 1. SETUP & AUTH ---
 SCOPES = [
@@ -23,7 +23,6 @@ SCOPES = [
 ]
 
 def get_client_config():
-    # We get this from the "Safe Box" (Secrets)
     if "gcp_service_account" in st.secrets:
         return json.loads(st.secrets["gcp_service_account"])
     else:
@@ -31,8 +30,7 @@ def get_client_config():
         st.stop()
 
 def load_creds(email):
-    # We look for the token in the "Safe Box" (Secrets)
-    # The key format is TOKEN_EMAIL_ADDRESS (e.g., TOKEN_BOB_GMAIL_COM)
+    # Standardize key format: TOKEN_USER_GMAIL_COM
     safe_email = email.replace("@", "_").replace(".", "_").upper()
     secret_key = f"TOKEN_{safe_email}"
     
@@ -59,9 +57,12 @@ def get_jd(creds, doc_id):
     return title, "".join(text)
 
 def get_sheet_col(creds, sheet_id, sheet_name):
-    sheets = build('sheets', 'v4', credentials=creds)
-    res = sheets.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"{sheet_name}!A:A").execute()
-    return [row[0] for row in res.get('values', []) if row]
+    try:
+        sheets = build('sheets', 'v4', credentials=creds)
+        res = sheets.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"{sheet_name}!A:A").execute()
+        return [row[0] for row in res.get('values', []) if row]
+    except Exception:
+        return [] # Return empty if sheet doesn't exist
 
 def log_send(creds, sheet_id, row):
     sheets = build('sheets', 'v4', credentials=creds)
@@ -77,94 +78,139 @@ def send_mail(creds, sender, to, subject, body, display_name):
     msg['To'] = to
     msg['From'] = formataddr((display_name, sender))
     msg['Subject'] = subject
+    # We removed Reply-To so they reply directly to the dummy
+    
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     service.users().messages().send(userId="me", body={'raw': raw}).execute()
 
-# --- 3. THE PHONE UI ---
-st.title("📨 Mail Merge")
+# --- 3. THE UI ---
+st.title("🚀 Mail Merge Pro")
 
 # TABS
-tab1, tab2 = st.tabs(["🚀 Run", "⚙️ Setup Accounts"])
+tab_run, tab_auth = st.tabs(["⚡ Operations Center", "⚙️ Account Manager"])
 
-with tab2:
-    st.write("### Account Manager")
-    # Get list of accounts from Secrets
+# --- TAB 2: ACCOUNT MANAGER (Same as before) ---
+with tab_auth:
+    st.write("### Connected Accounts")
     accounts = json.loads(st.secrets.get("DUMMY_ACCOUNTS", "[]"))
     
-    if not accounts:
-        st.warning("⚠️ No accounts found! Add 'DUMMY_ACCOUNTS' to Secrets.")
-    
-    # Handle the "I just logged in" return
     if "code" in st.query_params:
         code = st.query_params["code"]
         email_trying = st.query_params.get("state")
         try:
-            flow = Flow.from_client_config(
-                get_client_config(), SCOPES, 
-                redirect_uri="https://mail-merge-app-xuxkqmkhigxrnyoeftbfif.streamlit.app"
-            )
+            # DYNAMIC REDIRECT URI: Automatically gets the current URL
+            current_url = str(st.query_params).split('/?')[0] # Fallback if needed
+            # Hardcoded is safer if you know it, but let's use the one that worked for you
+            redirect_uri = "https://mail-merge-app-angrybird0red.streamlit.app"
+            
+            flow = Flow.from_client_config(get_client_config(), SCOPES, redirect_uri=redirect_uri)
             flow.fetch_token(code=code)
             creds = flow.credentials
-            st.success(f"✅ SUCCESS! Logged in as {email_trying}")
-            st.write("👇 **COPY THIS CODE** and paste it into your Secrets file:")
+            st.success(f"✅ Authenticated: {email_trying}")
             st.code(creds.to_json(), language="json")
-            st.info(f"Save it as: `TOKEN_{email_trying.replace('@','_').replace('.','_').upper()}`")
+            st.info(f"Save as: `TOKEN_{email_trying.replace('@','_').replace('.','_').upper()}` in Secrets")
         except Exception as e:
             st.error(str(e))
 
-    # Show Login Buttons
     for email in accounts:
         col1, col2 = st.columns([3, 1])
         creds = load_creds(email)
-        status = "✅ Ready" if creds else "❌ Not Connected"
-        col1.write(f"**{email}** - {status}")
-        
+        status = "✅ Ready" if creds else "❌ Disconnected"
+        col1.write(f"**{email}** : {status}")
         if not creds:
             if col2.button("Login", key=email):
-                flow = Flow.from_client_config(
-                    get_client_config(), SCOPES, 
-                    redirect_uri="https://mail-merge-app-xuxkqmkhigxrnyoeftbfif.streamlit.app"
-                )
+                redirect_uri = "https://mail-merge-app-angrybird0red.streamlit.app"
+                flow = Flow.from_client_config(get_client_config(), SCOPES, redirect_uri=redirect_uri)
                 url, _ = flow.authorization_url(prompt='consent', state=email)
-                st.link_button("Go to Google", url)
+                st.link_button("👉 Sign In", url)
 
-with tab1:
-    st.write("### Start Sending")
-    limit = st.slider("Emails per account", 1, 50, 20)
-    delay = st.number_input("Delay (seconds)", 5, 60, 20)
-    
-    if st.button("🔥 START MERGE", type="primary"):
-        # Load Configs
-        DOC_ID = st.secrets["DOC_ID"]
-        SHEET_ID = st.secrets["SHEET_ID"]
-        DISPLAY_NAME = st.secrets["DISPLAY_NAME"]
-        accounts = json.loads(st.secrets["DUMMY_ACCOUNTS"])
+# --- TAB 1: OPERATIONS CENTER (The New UI) ---
+with tab_run:
+    # Load Configs
+    DOC_ID = st.secrets.get("DOC_ID")
+    SHEET_ID = st.secrets.get("SHEET_ID")
+    DISPLAY_NAME = st.secrets.get("DISPLAY_NAME", "Recruitment Team")
+    all_accounts = json.loads(st.secrets.get("DUMMY_ACCOUNTS", "[]"))
+
+    # 1. CONTROL PANEL
+    with st.container(border=True):
+        st.subheader("🎛️ Control Panel")
+        c1, c2, c3 = st.columns(3)
         
-        status_box = st.empty()
+        with c1:
+            # ATS FEATURE: Select specific accounts
+            selected_accounts = st.multiselect(
+                "Select Senders", 
+                all_accounts, 
+                default=all_accounts
+            )
+        
+        with c2:
+            limit = st.number_input("Max Emails per Account", 1, 50, 20)
+            delay = st.number_input("Delay (seconds)", 5, 120, 20)
+            
+        with c3:
+            # ATS FEATURE: Dry Run Toggle
+            st.write("**Safety Mode**")
+            is_dry_run = st.toggle("🧪 Dry Run (Test Mode)", value=True)
+            if is_dry_run:
+                st.info("Simulation only. No emails will send.")
+            else:
+                st.warning("⚠️ LIVE MODE. Emails WILL be sent.")
+
+    # 2. PREVIEW AREA
+    if selected_accounts:
+        # Calculate stats
+        total_potential = len(selected_accounts) * limit
+        est_time_min = (total_potential * delay) / 60 / len(selected_accounts) if len(selected_accounts) > 0 else 0
+        
+        st.caption(f"📊 Campaign Stats: Targeting max **{total_potential}** candidates. Estimated run time: **{est_time_min:.1f} minutes**.")
+
+        # ATS FEATURE: Live Preview
+        with st.expander("👁️ Preview Email Template"):
+            try:
+                # Use first account to fetch doc
+                preview_creds = load_creds(all_accounts[0])
+                if preview_creds:
+                    subj, body = get_jd(preview_creds, DOC_ID)
+                    st.markdown(f"**Subject:** {subj}")
+                    st.text_area("Body content", body.replace("{first_name}", "John"), height=200)
+                else:
+                    st.warning("Login to the first account to see preview.")
+            except Exception as e:
+                st.error(f"Could not load preview: {e}")
+
+    # 3. EXECUTION LOG
+    st.divider()
+    if st.button("🔥 START CAMPAIGN", type="primary", disabled=not selected_accounts):
+        
+        status_box = st.container()
         logs = []
         
+        # Initialize DataFrame for live table
+        log_df = pd.DataFrame(columns=["Account", "Target", "Status", "Time"])
+        table_placeholder = st.empty()
+
         try:
-            # Get JD using first account
-            admin_creds = load_creds(accounts[0])
-            if not admin_creds:
-                st.error("First account needs to be logged in!")
-                st.stop()
-                
+            # Get JD once
+            admin_creds = load_creds(all_accounts[0])
             subject, body_template = get_jd(admin_creds, DOC_ID)
-            st.info(f"Using JD: {subject}")
             
-            # Loop accounts
-            for i, sender in enumerate(accounts):
+            # Loop selected accounts
+            for i, sender in enumerate(selected_accounts):
+                # Find original index for filter mapping (assuming filter0 corresponds to accounts[0])
+                original_index = all_accounts.index(sender)
+                
                 creds = load_creds(sender)
                 if not creds:
-                    logs.append(f"❌ {sender}: Skipped (Not logged in)")
-                    status_box.dataframe(logs)
+                    new_row = {"Account": sender, "Target": "-", "Status": "❌ Auth Failed", "Time": datetime.now().strftime("%H:%M:%S")}
+                    log_df = pd.concat([log_df, pd.DataFrame([new_row])], ignore_index=True)
+                    table_placeholder.dataframe(log_df, hide_index=True)
                     continue
                 
-                # Get emails for this filter
-                targets = get_sheet_col(creds, SHEET_ID, f"filter{i}")
+                # Fetch targets
+                targets = get_sheet_col(creds, SHEET_ID, f"filter{original_index}")
                 
-                # Sending Loop
                 count = 0
                 for target in targets:
                     if count >= limit: break
@@ -173,18 +219,38 @@ with tab1:
                     fname = target.split('@')[0].split('.')[0].capitalize()
                     final_body = body_template.replace("{first_name}", fname)
                     
+                    status_msg = ""
+                    
                     try:
-                        send_mail(creds, sender, target, subject, final_body, DISPLAY_NAME)
-                        log_send(creds, SHEET_ID, [target, subject, sender, str(datetime.now())])
-                        logs.append(f"✅ {sender} -> {target}")
+                        if is_dry_run:
+                            # SIMULATION
+                            status_msg = "🧪 Simulated Send"
+                            time.sleep(0.5) # Fake delay
+                        else:
+                            # REAL SEND
+                            send_mail(creds, sender, target, subject, final_body, DISPLAY_NAME)
+                            log_send(creds, SHEET_ID, [target, subject, sender, str(datetime.now())])
+                            status_msg = "✅ Sent"
+                            time.sleep(delay)
+                        
                         count += 1
-                        time.sleep(delay)
+                        
                     except Exception as e:
-                        logs.append(f"❌ {sender} -> {target} : {e}")
+                        status_msg = f"❌ Error: {e}"
                     
-                    status_box.dataframe(logs)
-                    
-            st.success("Batch Completed!")
+                    # Update Table
+                    new_row = {
+                        "Account": sender, 
+                        "Target": target, 
+                        "Status": status_msg, 
+                        "Time": datetime.now().strftime("%H:%M:%S")
+                    }
+                    log_df = pd.concat([log_df, pd.DataFrame([new_row])], ignore_index=True)
+                    table_placeholder.dataframe(log_df, hide_index=True)
             
+            st.success("Batch Run Completed!")
+            if is_dry_run:
+                st.info("This was a Dry Run. Uncheck the toggle to send real emails.")
+                
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Critical Error: {e}")
