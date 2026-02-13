@@ -76,6 +76,25 @@ if 'stop_clicked' not in st.session_state: st.session_state.stop_clicked = False
 
 # --- 3. UI TABS ---
 st.title("👔 Mail Merge Elite V5")
+
+# [[[ NEW SECTION: CHECK FOR LOGIN SUCCESS AT THE VERY TOP ]]]
+if "code" in st.query_params:
+    code = st.query_params["code"]
+    email_trying = st.query_params.get("state", "Unknown Account")
+    try:
+        redirect_uri = "https://mail-merge-app-xuxkqmkhigxrnyoeftbfif.streamlit.app"
+        # Ensure your SCOPES variable is defined above this!
+        flow = Flow.from_client_config(get_client_config(), SCOPES, redirect_uri=redirect_uri)
+        flow.fetch_token(code=code)
+        
+        st.success(f"✅ LOGIN SUCCESS FOR: {email_trying}")
+        st.warning("⬇️ COPY THIS TOKEN BELOW AND PASTE INTO SECRETS ⬇️")
+        st.code(json.dumps(flow.credentials.to_json()), language="json")
+        st.stop() # Stop loading the rest of the app so you focus on copying
+    except Exception as e:
+        st.error(f"Login Error: {str(e)}")
+
+# --- TABS START HERE ---
 tab_run, tab_preview, tab_auth = st.tabs(["⚡ Operations", "👁️ Preview", "⚙️ Accounts"])
 
 # --- TAB: ACCOUNTS (FIXED FOR RE-AUTH) ---
