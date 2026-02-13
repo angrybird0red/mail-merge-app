@@ -3,6 +3,7 @@ import json
 import time
 import random
 import pandas as pd
+import re
 from datetime import datetime
 import base64
 
@@ -71,28 +72,64 @@ def load_creds(email):
     return None
 
 def get_jd_html(creds, doc_id):
-    """Exports Google Doc as HTML and aggressively fixes spacing issues."""
+    """Exports Google Doc and STRIPS all the extra spacing junk."""
     drive_service = build('drive', 'v3', credentials=creds)
     html_content = drive_service.files().export(fileId=doc_id, mimeType='text/html').execute()
     decoded_html = html_content.decode('utf-8')
     
-    # --- CSS HACK V2: THE NUCLEAR OPTION ---
+    # --- PHASE 1: REMOVE GOOGLE'S DEFAULT PADDING ---
+    # Google adds "padding-bottom: Xpt" to everything. We kill it.
+    decoded_html = re.sub(r'padding-bottom:\s*\d+pt;?', 'padding-bottom: 0pt;', decoded_html)
+    decoded_html = re.sub(r'margin-bottom:\s*\d+pt;?', 'margin-bottom: 0pt;', decoded_html)
+    decoded_html = re.sub(r'padding-top:\s*\d+pt;?', 'padding-top: 0pt;', decoded_html)
+    decoded_html = re.sub(r'margin-top:\s*\d+pt;?', 'margin-top: 0pt;', decoded_html)
+
+    # --- PHASE 2: INJECT TIGHT CSS ---
+    # We enforce a strict "Compact Mode" for emails
     style_fix = """
     <style>
+        body, table, td, p, a, li, blockquote {
+            -webkit-text-size-adjust: 100%;
+            -ms-text-size-adjust: 100%;
+        }
         body { 
             font-family: Arial, Helvetica, sans-serif !important; 
-            font-size: 11pt !important; 
-            line-height: 1.4 !important; 
+            font-size: 14px !important; 
+            line-height: 1.3 !important; /* Tighter line height */
             color: #000000 !important;
-            background-color: transparent !important;
+            margin: 0 !important;
+            padding: 0 !important;
         }
-        p { margin-top: 0 !important; margin-bottom: 12px !important; padding: 0 !important; }
-        ul, ol { margin-top: 0 !important; margin-bottom: 12px !important; padding-left: 30px !important; }
-        li { margin-bottom: 2px !important; margin-top: 0 !important; }
-        li p { margin: 0 !important; padding: 0 !important; display: inline !important; }
-        h1, h2, h3, h4 { margin-top: 18px !important; margin-bottom: 8px !important; font-weight: bold !important; }
+        
+        /* Force Paragraphs to be tight */
+        p { 
+            margin-top: 0 !important; 
+            margin-bottom: 8px !important; /* Small gap only */
+            padding: 0 !important;
+        }
+
+        /* Force Lists to be tight */
+        ul, ol { 
+            margin-top: 0 !important; 
+            margin-bottom: 8px !important; 
+            padding-left: 25px !important; 
+        }
+        
+        /* The Bullet Points themselves */
+        li { 
+            margin-bottom: 2px !important; 
+            padding-bottom: 0 !important;
+        }
+        
+        /* CRITICAL: Google puts <p> inside <li>. This kills the double-gap. */
+        li p {
+            margin: 0 !important;
+            padding: 0 !important;
+            display: inline-block !important;
+        }
     </style>
     """
+    
     clean_html = style_fix + decoded_html
 
     docs_service = build('docs', 'v1', credentials=creds)
