@@ -194,4 +194,44 @@ with tab_run:
                 count = 0
                 for target in targets:
                     if count >= limit: 
-                        dashboard_df.at[sender, "Status
+                        dashboard_df.at[sender, "Status"] = "⏹️ Limit Reached"
+                        break
+                    
+                    # Update Target Column
+                    dashboard_df.at[sender, "Target Email"] = target
+                    dashboard_df.at[sender, "Status"] = "Processing..."
+                    table_placeholder.dataframe(dashboard_df, use_container_width=True)
+                    
+                    # Personalize
+                    fname = target.split('@')[0].split('.')[0].capitalize()
+                    final_body = body_template.replace("{first_name}", fname)
+                    
+                    try:
+                        if is_dry_run:
+                            # SIMULATION
+                            time.sleep(0.5) 
+                        else:
+                            # REAL SEND
+                            send_mail(creds, sender, target, subject, final_body, DISPLAY_NAME)
+                            log_send(creds, SHEET_ID, [target, subject, sender, str(datetime.now())])
+                            time.sleep(delay)
+                        
+                        # Update Counts
+                        count += 1
+                        dashboard_df.at[sender, "Sent"] = count
+                        dashboard_df.at[sender, "Status"] = "✅ Sent"
+                        
+                    except Exception as e:
+                        dashboard_df.at[sender, "Errors"] += 1
+                        dashboard_df.at[sender, "Status"] = f"❌ Error"
+                    
+                    # Refresh Table
+                    table_placeholder.dataframe(dashboard_df, use_container_width=True)
+
+                dashboard_df.at[sender, "Status"] = "✨ Done"
+                table_placeholder.dataframe(dashboard_df, use_container_width=True)
+            
+            st.success("Batch Run Completed!")
+            
+        except Exception as e:
+            st.error(f"Critical Error: {e}")
