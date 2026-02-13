@@ -78,33 +78,26 @@ if 'stop_clicked' not in st.session_state: st.session_state.stop_clicked = False
 st.title("👔 Mail Merge Elite V5")
 tab_run, tab_preview, tab_auth = st.tabs(["⚡ Operations", "👁️ Preview", "⚙️ Accounts"])
 
-# --- TAB: ACCOUNTS ---
+# --- TAB: ACCOUNTS (FIXED FOR RE-AUTH) ---
 with tab_auth:
     st.subheader("Account Authorization")
     accounts = json.loads(st.secrets.get("DUMMY_ACCOUNTS", "[]"))
     
-    if "code" in st.query_params:
-        code, email_trying = st.query_params["code"], st.query_params.get("state")
-        try:
-            redirect_uri = "https://mail-merge-app-angrybird0red.streamlit.app"
-            flow = Flow.from_client_config(get_client_config(), SCOPES, redirect_uri=redirect_uri)
-            flow.fetch_token(code=code)
-            st.success(f"✅ Success for {email_trying}")
-            st.code(flow.credentials.to_json(), language="json")
-            st.info(f"Copy/Paste into Secrets as `TOKEN_{email_trying.replace('@','_').replace('.','_').upper()}`")
-        except Exception as e: st.error(str(e))
+    # ... (Keep your query_params/code handling block here) ...
 
     for email in accounts:
         col1, col2 = st.columns([3, 1])
         creds = load_creds(email)
         status = "✅ Ready" if creds else "❌ Disconnected"
         col1.write(f"**{email}** : {status}")
-        if not creds:
-            if col2.button("Login", key=f"login_{email}"):
-                redirect_uri = "https://mail-merge-app-angrybird0red.streamlit.app"
-                flow = Flow.from_client_config(get_client_config(), SCOPES, redirect_uri=redirect_uri)
-                url, _ = flow.authorization_url(prompt='consent', state=email)
-                st.link_button("👉 Start Auth", url)
+        
+        # CHANGED: We removed "if not creds:" so the button is ALWAYS there
+        if col2.button("Login / Refresh", key=f"login_{email}"):
+            redirect_uri = "https://mail-merge-app-angrybird0red.streamlit.app"
+            flow = Flow.from_client_config(get_client_config(), SCOPES, redirect_uri=redirect_uri)
+            # The 'state' ensures Google tells the app EXACTLY which account is signing in
+            url, _ = flow.authorization_url(prompt='consent', state=email)
+            st.link_button("👉 Start Auth", url)
 
 # --- TAB: PREVIEW ---
 with tab_preview:
