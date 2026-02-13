@@ -18,7 +18,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 
-st.set_page_config(page_title="Mail Merge Elite V5", page_icon="👔", layout="wide")
+st.set_page_config(page_title="Simple Merge", page_icon="👔", layout="wide")
 
 # --- 1. CORE LOGIC (FORMATTING FIX) ---
 # We use Drive API for HTML export to keep 1:1 formatting
