@@ -72,74 +72,66 @@ def load_creds(email):
     return None
 
 def get_jd_html(creds, doc_id):
-    """Exports Google Doc and STRIPS all the extra spacing junk (including top gap)."""
+    """Exports Google Doc and aggressively strips top gaps for Gmail."""
     drive_service = build('drive', 'v3', credentials=creds)
     html_content = drive_service.files().export(fileId=doc_id, mimeType='text/html').execute()
     decoded_html = html_content.decode('utf-8')
     
-    # --- PHASE 1: REMOVE GOOGLE'S DEFAULT PADDING ---
-    decoded_html = re.sub(r'padding-bottom:\s*\d+pt;?', 'padding-bottom: 0pt;', decoded_html)
-    decoded_html = re.sub(r'margin-bottom:\s*\d+pt;?', 'margin-bottom: 0pt;', decoded_html)
-    decoded_html = re.sub(r'padding-top:\s*\d+pt;?', 'padding-top: 0pt;', decoded_html)
-    decoded_html = re.sub(r'margin-top:\s*\d+pt;?', 'margin-top: 0pt;', decoded_html)
+    # --- PHASE 1: THE VACUUM CLEANER (Global Spacing) ---
+    # Strip all specific pt/px margins and paddings from the Doc
+    decoded_html = re.sub(r'margin-top:\s*[\d\.]+(pt|px|cm|in);?', 'margin-top: 0 !important;', decoded_html)
+    decoded_html = re.sub(r'margin-bottom:\s*[\d\.]+(pt|px|cm|in);?', 'margin-bottom: 0 !important;', decoded_html)
+    decoded_html = re.sub(r'padding-top:\s*[\d\.]+(pt|px|cm|in);?', 'padding-top: 0 !important;', decoded_html)
+    decoded_html = re.sub(r'padding-bottom:\s*[\d\.]+(pt|px|cm|in);?', 'padding-bottom: 0 !important;', decoded_html)
+    
+    # --- PHASE 2: THE WRAPPER KILLER (Crucial for Top Gap) ---
+    # Google Docs wraps everything in a class like "c12" with huge padding. 
+    # We force ALL classes to have 0 padding/margin.
+    decoded_html = re.sub(r'\.c\d+\s*{[^}]+}', '', decoded_html) # Nuke Google's class definitions
+    
+    # --- PHASE 3: INLINE INJECTION (For Gmail Compatibility) ---
+    # Gmail ignores <style> blocks for the first element. We must INJECT inline styles.
+    # This regex finds the first H1, H2, or P tag and forces margin:0 on it directly.
+    decoded_html = re.sub(r'(<(h[1-6]|p)[^>]*>)', r'\1', decoded_html, count=1)
+    
+    # We replace the body tag with one that forces zero spacing
+    if "<body" in decoded_html:
+        decoded_html = re.sub(r'<body[^>]*>', '<body style="margin:0; padding:0; background-color:#ffffff;">', decoded_html)
 
-    # --- PHASE 2: INJECT TIGHT CSS ---
+    # --- PHASE 4: REBUILT CSS (Tight & Clean) ---
     style_fix = """
     <style>
-        body, table, td, p, a, li, blockquote {
-            -webkit-text-size-adjust: 100%;
-            -ms-text-size-adjust: 100%;
-        }
-        body { 
+        /* Global Reset */
+        body { margin: 0 !important; padding: 0 !important; }
+        
+        /* Force the very first element to touch the top */
+        body > *, body > div > * { margin-top: 0 !important; padding-top: 0 !important; }
+        
+        /* Typography */
+        body, td, p, h1, h2, h3 { 
             font-family: Arial, Helvetica, sans-serif !important; 
-            font-size: 14px !important; 
-            line-height: 1.3 !important; 
             color: #000000 !important;
-            margin: 0 !important;
-            padding: 0 !important;
         }
         
-        /* Force Paragraphs to be tight */
-        p { 
-            margin-top: 0 !important; 
-            margin-bottom: 8px !important; 
-            padding: 0 !important;
-        }
-
-        /* Force Lists to be tight */
-        ul, ol { 
-            margin-top: 0 !important; 
-            margin-bottom: 8px !important; 
-            padding-left: 25px !important; 
-        }
+        /* Tighten Paragraphs */
+        p { margin-bottom: 8px !important; margin-top: 0 !important; }
         
-        li { 
-            margin-bottom: 2px !important; 
-            padding-bottom: 0 !important;
-        }
+        /* Tighten Lists */
+        ul, ol { margin-top: 0 !important; margin-bottom: 8px !important; padding-left: 25px !important; }
+        li { margin-bottom: 2px !important; }
         
-        li p {
-            margin: 0 !important;
-            padding: 0 !important;
-            display: inline-block !important;
-        }
-
+        /* Fix the Google Doc "List Paragraph" Bug */
+        li p { display: inline !important; margin: 0 !important; }
+        
         /* Headings */
-        h1, h2, h3, h4 { 
-            margin-top: 18px !important; 
-            margin-bottom: 8px !important; 
-            font-weight: bold !important;
-        }
-
-        /* --- THE FIX: KILL TOP GAP --- */
-        /* This targets the very first element in the email and removes its top space */
-        body > :first-child {
-            margin-top: 0 !important;
-            padding-top: 0 !important;
-        }
+        h1, h2, h3 { margin-bottom: 10px !important; margin-top: 15px !important; }
+        
+        /* EXCEPT the first heading - kill its top margin */
+        h1:first-child, h2:first-child, h3:first-child { margin-top: 0 !important; }
     </style>
     """
     
+    # Prepend our "Super CSS" to the clean HTML
     clean_html = style_fix + decoded_html
 
     docs_service = build('docs', 'v1', credentials=creds)
