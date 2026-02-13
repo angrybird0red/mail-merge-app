@@ -4,9 +4,12 @@ import time
 import random
 import pandas as pd
 from datetime import datetime
-from email.message import EmailMessage
-from email.utils import formataddr
 import base64
+
+# --- NEW IMPORTS FOR ROBUST HTML EMAILS ---
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr
 
 # Google Libraries
 from google.oauth2.credentials import Credentials
@@ -139,19 +142,21 @@ def get_full_sheet_data(creds, sheet_id, sheet_name):
     except: return []
 
 def send_mail_html(creds, sender, to, subject, html_body, display_name):
-    """Sends a professional HTML-formatted email."""
+    """Sends a professional HTML-formatted email using MIMEMultipart."""
     service = build('gmail', 'v1', credentials=creds)
-    msg = EmailMessage()
     
-    # Set the content subtype to 'html' to render bold/line breaks
-    msg.add_header('Content-Type', 'text/html')
-    msg.set_payload(html_body)
+    # Use MIMEMultipart - this is the standard for HTML emails
+    message = MIMEMultipart("alternative")
+    message['To'] = to
+    message['From'] = formataddr((display_name, sender))
+    message['Subject'] = subject
+
+    # Attach the HTML body properly
+    msg_html = MIMEText(html_body, "html")
+    message.attach(msg_html)
     
-    msg['To'] = to
-    msg['From'] = formataddr((display_name, sender))
-    msg['Subject'] = subject
-    
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    # Encode and send
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     service.users().messages().send(userId="me", body={'raw': raw}).execute()
 
 # --- 2. SESSION STATE ---
@@ -279,7 +284,10 @@ with tab_run:
                         dashboard_df.at[s["email"], "Sent"] = s["idx"]
                         dashboard_df.at[s["email"], "Status"] = "✅ Sent"
                     except Exception as e:
-                        dashboard_df.at[s["email"], "Status"] = f"❌ Error"
+                    # This will print the ACTUAL error message in the table so we can debug it
+                    error_msg = str(e).split(']')[0] # Keep it short enough to fit
+                    dashboard_df.at[s["email"], "Status"] = f"❌ {error_msg}"
+                    st.error(f"Detailed Error for {s['email']}: {e}") # Prints full details at bottom of screen
                     
                     time.sleep(1)
                     table_ui.dataframe(dashboard_df, use_container_width=True)
