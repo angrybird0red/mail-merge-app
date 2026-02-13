@@ -93,7 +93,7 @@ with tab_auth:
         
         # CHANGED: We removed "if not creds:" so the button is ALWAYS there
         if col2.button("Login / Refresh", key=f"login_{email}"):
-            redirect_uri = "https://mail-merge-app-angrybird0red.streamlit.app"
+            redirect_uri = "https://mail-merge-app-xuxkqmkhigxrnyoeftbfif.streamlit.app"
             flow = Flow.from_client_config(get_client_config(), SCOPES, redirect_uri=redirect_uri)
             # The 'state' ensures Google tells the app EXACTLY which account is signing in
             url, _ = flow.authorization_url(prompt='consent', state=email)
