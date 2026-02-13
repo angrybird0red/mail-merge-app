@@ -220,10 +220,17 @@ with tab_preview:
     else: st.warning("Connect your first account to preview.")
 
 # --- TAB: OPERATIONS ---
+# --- TAB: OPERATIONS ---
 with tab_run:
     all_acc = json.loads(st.secrets["DUMMY_ACCOUNTS"])
+    
     with st.sidebar:
         st.header("⚙️ Configuration")
+        
+        # [NEW] Dynamic Display Name Input
+        # It defaults to secrets, but you can change it on the fly!
+        display_name = st.text_input("Send As Name", value=st.secrets.get("DISPLAY_NAME", "Recruitment Team"))
+        
         sel_acc = st.multiselect("Active Senders", all_acc, default=all_acc)
         limit = st.number_input("Max Per Account", 1, 500, 20)
         delay = st.number_input("Round Delay (s)", 5, 600, 20)
@@ -274,7 +281,8 @@ with tab_run:
 
                     try:
                         if not is_dry: 
-                            send_mail_html(s["creds"], s["email"], target, subj, final_body, st.secrets["DISPLAY_NAME"])
+                            # CHANGED: Use the 'display_name' variable from the sidebar input
+                            send_mail_html(s["creds"], s["email"], target, subj, final_body, display_name)
                         
                         s["idx"] += 1
                         sent_total += 1
