@@ -199,7 +199,6 @@ with tab_run:
         table_placeholder.dataframe(dashboard_df, use_container_width=True)
         
         # --- B. ROUND ROBIN LOOP ---
-        # We loop from 0 to LIMIT. In each iteration, every account sends 1 email.
         for round_num in range(limit):
             
             emails_sent_this_round = 0
@@ -210,48 +209,55 @@ with tab_run:
                 current_idx = sender_obj["idx"]
                 targets = sender_obj["targets"]
                 
-                # Check if this sender still has targets and hasn't hit limit
                 if current_idx < len(targets):
                     target = targets[current_idx]
                     
-                    # Update Dashboard: "Processing..."
                     dashboard_df.at[sender_email, "Target Email"] = target
                     dashboard_df.at[sender_email, "Status"] = "🚀 Sending..."
                     table_placeholder.dataframe(dashboard_df, use_container_width=True)
                     
-                    # Personalize
                     fname = target.split('@')[0].split('.')[0].capitalize()
                     final_body = body_template.replace("{first_name}", fname)
                     
                     try:
                         if is_dry_run:
-                            time.sleep(0.5) # Fake send time
+                            time.sleep(0.3) 
                         else:
                             send_mail(sender_obj["creds"], sender_email, target, subject, final_body, DISPLAY_NAME)
                             log_send(sender_obj["creds"], SHEET_ID, [target, subject, sender_email, str(datetime.now())])
                         
-                        # Success Update
                         sender_obj["idx"] += 1
                         dashboard_df.at[sender_email, "Sent"] = sender_obj["idx"]
-                        dashboard_df.at[sender_email, "Status"] = f"✅ Sent ({round_num + 1})"
+                        dashboard_df.at[sender_email, "Status"] = "✅ Sent"
                         emails_sent_this_round += 1
                         
                     except Exception as e:
                         dashboard_df.at[sender_email, "Errors"] += 1
                         dashboard_df.at[sender_email, "Status"] = "❌ Error"
                     
-                    # Small buffer between ACCOUNTS (to prevent API burst)
-                    time.sleep(1) 
+                    time.sleep(0.5) # Fast internal buffer
                     table_placeholder.dataframe(dashboard_df, use_container_width=True)
             
-            # 2. End of Round Check
             if emails_sent_this_round == 0:
-                break # Everyone ran out of targets
+                break 
                 
-            # 3. THE BIG DELAY (Waits after the WHOLE batch is done)
-            if round_num < limit - 1: # Don't wait after the very last round
-                dashboard_df["Status"] = dashboard_df["Status"].apply(lambda x: f"⏳ Waiting {delay}s..." if "Sent" in str(x) else x)
-                table_placeholder.dataframe(dashboard_df, use_container_width=True)
-                time.sleep(delay)
+            # 2. THE DYNAMIC COUNTDOWN (The Fix)
+            if round_num < limit - 1:
+                # Loop through the seconds backward
+                for seconds_left in range(delay, 0, -1):
+                    # Update all active accounts to show the current countdown
+                    for sender_obj in active_senders:
+                        s_email = sender_obj["email"]
+                        # Only update status for accounts that are actually working
+                        if "Auth Failed" not in dashboard_df.at[s_email, "Status"]:
+                            dashboard_df.at[s_email, "Status"] = f"⏳ Waiting {seconds_left}s..."
+                    
+                    # Refresh the table every 1 second
+                    table_placeholder.dataframe(dashboard_df, use_container_width=True)
+                    time.sleep(1)
 
+        # Final Cleanup
+        for sender_obj in active_senders:
+            dashboard_df.at[sender_obj["email"], "Status"] = "✨ Done"
+        table_placeholder.dataframe(dashboard_df, use_container_width=True)
         st.success("Batch Run Completed!")
