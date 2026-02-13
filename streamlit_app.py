@@ -72,20 +72,18 @@ def load_creds(email):
     return None
 
 def get_jd_html(creds, doc_id):
-    """Exports Google Doc and STRIPS all the extra spacing junk."""
+    """Exports Google Doc and STRIPS all the extra spacing junk (including top gap)."""
     drive_service = build('drive', 'v3', credentials=creds)
     html_content = drive_service.files().export(fileId=doc_id, mimeType='text/html').execute()
     decoded_html = html_content.decode('utf-8')
     
     # --- PHASE 1: REMOVE GOOGLE'S DEFAULT PADDING ---
-    # Google adds "padding-bottom: Xpt" to everything. We kill it.
     decoded_html = re.sub(r'padding-bottom:\s*\d+pt;?', 'padding-bottom: 0pt;', decoded_html)
     decoded_html = re.sub(r'margin-bottom:\s*\d+pt;?', 'margin-bottom: 0pt;', decoded_html)
     decoded_html = re.sub(r'padding-top:\s*\d+pt;?', 'padding-top: 0pt;', decoded_html)
     decoded_html = re.sub(r'margin-top:\s*\d+pt;?', 'margin-top: 0pt;', decoded_html)
 
     # --- PHASE 2: INJECT TIGHT CSS ---
-    # We enforce a strict "Compact Mode" for emails
     style_fix = """
     <style>
         body, table, td, p, a, li, blockquote {
@@ -95,7 +93,7 @@ def get_jd_html(creds, doc_id):
         body { 
             font-family: Arial, Helvetica, sans-serif !important; 
             font-size: 14px !important; 
-            line-height: 1.3 !important; /* Tighter line height */
+            line-height: 1.3 !important; 
             color: #000000 !important;
             margin: 0 !important;
             padding: 0 !important;
@@ -104,7 +102,7 @@ def get_jd_html(creds, doc_id):
         /* Force Paragraphs to be tight */
         p { 
             margin-top: 0 !important; 
-            margin-bottom: 8px !important; /* Small gap only */
+            margin-bottom: 8px !important; 
             padding: 0 !important;
         }
 
@@ -115,17 +113,29 @@ def get_jd_html(creds, doc_id):
             padding-left: 25px !important; 
         }
         
-        /* The Bullet Points themselves */
         li { 
             margin-bottom: 2px !important; 
             padding-bottom: 0 !important;
         }
         
-        /* CRITICAL: Google puts <p> inside <li>. This kills the double-gap. */
         li p {
             margin: 0 !important;
             padding: 0 !important;
             display: inline-block !important;
+        }
+
+        /* Headings */
+        h1, h2, h3, h4 { 
+            margin-top: 18px !important; 
+            margin-bottom: 8px !important; 
+            font-weight: bold !important;
+        }
+
+        /* --- THE FIX: KILL TOP GAP --- */
+        /* This targets the very first element in the email and removes its top space */
+        body > :first-child {
+            margin-top: 0 !important;
+            padding-top: 0 !important;
         }
     </style>
     """
@@ -135,7 +145,7 @@ def get_jd_html(creds, doc_id):
     docs_service = build('docs', 'v1', credentials=creds)
     doc = docs_service.documents().get(documentId=doc_id).execute()
     return doc.get('title'), clean_html
-
+    
 def get_full_sheet_data(creds, sheet_id, sheet_name):
     try:
         sheets = build('sheets', 'v4', credentials=creds)
