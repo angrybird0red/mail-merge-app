@@ -68,13 +68,33 @@ def load_creds(email):
     return None
     
 def get_jd_html(creds, doc_id):
-    """Exports Google Doc as HTML to preserve 1:1 formatting."""
+    """Exports Google Doc as HTML and fixes the 'Big Ass Line Break' issue."""
     drive_service = build('drive', 'v3', credentials=creds)
     html_content = drive_service.files().export(fileId=doc_id, mimeType='text/html').execute()
+    decoded_html = html_content.decode('utf-8')
     
+    # --- CSS HACK: TIGHTEN SPACING ---
+    # We inject styles to override Google's huge default margins.
+    # 'margin: 0' kills the space, 'margin-bottom: 0.8em' gives a nice standard gap.
+    style_fix = """
+    <style>
+        body { font-family: Arial, sans-serif; font-size: 14px; line-height: 1.5; color: #000000; }
+        p { margin-top: 0 !important; margin-bottom: 10px !important; padding: 0; }
+        ul, ol { margin-top: 0 !important; margin-bottom: 10px !important; padding-left: 20px; }
+        li { margin-bottom: 5px !important; }
+        h1, h2, h3 { margin-top: 20px !important; margin-bottom: 10px !important; }
+    </style>
+    """
+    
+    # Inject our style fix right before the body content starts
+    if "<head>" in decoded_html:
+        clean_html = decoded_html.replace("</head>", style_fix + "</head>")
+    else:
+        clean_html = style_fix + decoded_html
+
     docs_service = build('docs', 'v1', credentials=creds)
     doc = docs_service.documents().get(documentId=doc_id).execute()
-    return doc.get('title'), html_content.decode('utf-8')
+    return doc.get('title'), clean_html
 
 def get_full_sheet_data(creds, sheet_id, sheet_name):
     try:
