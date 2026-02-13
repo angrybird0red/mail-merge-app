@@ -29,16 +29,35 @@ def get_client_config():
     return json.loads(st.secrets["gcp_service_account"])
 
 def load_creds(email):
+    # Standardize key format
     safe_email = email.replace("@", "_").replace(".", "_").upper()
     secret_key = f"TOKEN_{safe_email}"
+    
     if secret_key in st.secrets:
-        token_info = json.loads(st.secrets[secret_key])
-        creds = Credentials.from_authorized_user_info(token_info)
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        return creds
+        try:
+            token_info = json.loads(st.secrets[secret_key])
+            
+            # --- THE FIX: AUTO-FILL MISSING INFO ---
+            # If the token is missing the Client ID/Secret, grab them from the main config
+            # This prevents the "AttributeError: missing keys" crash
+            if "client_id" not in token_info:
+                main_config = json.loads(st.secrets["gcp_service_account"])
+                # Handle both 'web' and 'installed' formats just in case
+                app_info = main_config.get("web", main_config.get("installed", {}))
+                token_info["client_id"] = app_info.get("client_id")
+                token_info["client_secret"] = app_info.get("client_secret")
+            
+            creds = Credentials.from_authorized_user_info(token_info)
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            return creds
+            
+        except Exception as e:
+            # If a specific token is corrupted, print error but don't crash the whole app
+            st.error(f"⚠️ Error loading token for {email}: {e}")
+            return None
     return None
-
+    
 def get_jd_html(creds, doc_id):
     """Exports Google Doc as HTML to preserve 1:1 formatting."""
     drive_service = build('drive', 'v3', credentials=creds)
