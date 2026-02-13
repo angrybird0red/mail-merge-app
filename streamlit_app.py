@@ -69,7 +69,7 @@ def load_creds(email):
             st.error(f"⚠️ Token Error for {email}: {e}")
             return None
     return None
-    
+
 def get_jd_html(creds, doc_id):
     """Exports Google Doc as HTML and aggressively fixes spacing issues."""
     drive_service = build('drive', 'v3', credentials=creds)
@@ -77,9 +77,6 @@ def get_jd_html(creds, doc_id):
     decoded_html = html_content.decode('utf-8')
     
     # --- CSS HACK V2: THE NUCLEAR OPTION ---
-    # 1. 'li p' targets paragraphs INSIDE lists to kill their gap.
-    # 2. 'line-height: 1.4' tightens the vertical rhythm.
-    # 3. 'margin-bottom: 0' on list items prevents double spacing.
     style_fix = """
     <style>
         body { 
@@ -89,45 +86,13 @@ def get_jd_html(creds, doc_id):
             color: #000000 !important;
             background-color: transparent !important;
         }
-        
-        /* Standard Paragraphs (Normal Text) */
-        p { 
-            margin-top: 0 !important; 
-            margin-bottom: 12px !important; 
-            padding: 0 !important;
-        }
-
-        /* Lists */
-        ul, ol { 
-            margin-top: 0 !important; 
-            margin-bottom: 12px !important; 
-            padding-left: 30px !important; 
-        }
-        
-        /* List Items */
-        li { 
-            margin-bottom: 2px !important; /* Tiny gap between bullets */
-            margin-top: 0 !important;
-        }
-        
-        /* CRITICAL FIX: Kill margins for paragraphs sitting inside lists */
-        li p { 
-            margin: 0 !important; 
-            padding: 0 !important; 
-            display: inline !important; /* Forces text to sit on one line */
-        }
-        
-        /* Headings */
-        h1, h2, h3, h4 { 
-            margin-top: 18px !important; 
-            margin-bottom: 8px !important; 
-            font-weight: bold !important;
-        }
+        p { margin-top: 0 !important; margin-bottom: 12px !important; padding: 0 !important; }
+        ul, ol { margin-top: 0 !important; margin-bottom: 12px !important; padding-left: 30px !important; }
+        li { margin-bottom: 2px !important; margin-top: 0 !important; }
+        li p { margin: 0 !important; padding: 0 !important; display: inline !important; }
+        h1, h2, h3, h4 { margin-top: 18px !important; margin-bottom: 8px !important; font-weight: bold !important; }
     </style>
     """
-    
-    # Prepend style to the body. This is safer than replacing </head> 
-    # because sometimes Google export skips the head tag.
     clean_html = style_fix + decoded_html
 
     docs_service = build('docs', 'v1', credentials=creds)
@@ -159,39 +124,33 @@ def send_mail_html(creds, sender, to, subject, html_body, display_name):
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     service.users().messages().send(userId="me", body={'raw': raw}).execute()
 
-# --- 2. SESSION STATE ---
-if 'stop_clicked' not in st.session_state: st.session_state.stop_clicked = False
-
-# --- 3. UI TABS ---
+# --- 2. UI SETUP ---
 st.title("👔 Mail Merge Elite V5")
 
-# [[[ NEW SECTION: CHECK FOR LOGIN SUCCESS AT THE VERY TOP ]]]
+# [[[ CHECK FOR LOGIN SUCCESS AT THE VERY TOP ]]]
 if "code" in st.query_params:
     code = st.query_params["code"]
     email_trying = st.query_params.get("state", "Unknown Account")
     try:
         redirect_uri = "https://mail-merge-app-xuxkqmkhigxrnyoeftbfif.streamlit.app"
-        # Ensure your SCOPES variable is defined above this!
         flow = Flow.from_client_config(get_client_config(), SCOPES, redirect_uri=redirect_uri)
         flow.fetch_token(code=code)
         
         st.success(f"✅ LOGIN SUCCESS FOR: {email_trying}")
         st.warning("⬇️ COPY THIS TOKEN BELOW AND PASTE INTO SECRETS ⬇️")
-        # Just show the raw JSON string directly
         st.code(flow.credentials.to_json(), language="json")
         st.stop() # Stop loading the rest of the app so you focus on copying
     except Exception as e:
         st.error(f"Login Error: {str(e)}")
 
-# --- TABS START HERE ---
+# --- 3. TABS ---
+if 'stop_clicked' not in st.session_state: st.session_state.stop_clicked = False
 tab_run, tab_preview, tab_auth = st.tabs(["⚡ Operations", "👁️ Preview", "⚙️ Accounts"])
 
-# --- TAB: ACCOUNTS (FIXED FOR RE-AUTH) ---
+# --- TAB: ACCOUNTS ---
 with tab_auth:
     st.subheader("Account Authorization")
     accounts = json.loads(st.secrets.get("DUMMY_ACCOUNTS", "[]"))
-    
-    # ... (Keep your query_params/code handling block here) ...
 
     for email in accounts:
         col1, col2 = st.columns([3, 1])
@@ -199,11 +158,10 @@ with tab_auth:
         status = "✅ Ready" if creds else "❌ Disconnected"
         col1.write(f"**{email}** : {status}")
         
-        # CHANGED: We removed "if not creds:" so the button is ALWAYS there
+        # Always show login button to allow re-auth/refresh
         if col2.button("Login / Refresh", key=f"login_{email}"):
             redirect_uri = "https://mail-merge-app-xuxkqmkhigxrnyoeftbfif.streamlit.app"
             flow = Flow.from_client_config(get_client_config(), SCOPES, redirect_uri=redirect_uri)
-            # The 'state' ensures Google tells the app EXACTLY which account is signing in
             url, _ = flow.authorization_url(prompt='consent', state=email)
             st.link_button("👉 Start Auth", url)
 
@@ -218,7 +176,6 @@ with tab_preview:
             st.markdown("**Personalized Preview (with HTML formatting):**")
             # Replace tags in the HTML string
             preview_html = html_body.replace("{first_name}", "John").replace("{company}", "TechCorp").replace("{job_title}", "Analyst")
-            # Render the HTML in Streamlit for preview
             st.html(preview_html)
         except Exception as e: st.error(f"Could not load preview: {e}")
     else: st.warning("Connect your first account to preview.")
@@ -270,7 +227,6 @@ with tab_run:
                     role = row[2] if len(row) > 2 else "the open position"
                     fname = target.split('@')[0].split('.')[0].capitalize()
                     
-                    # The formatting fix:
                     final_body = body_tmpl.replace("{first_name}", fname).replace("{company}", comp).replace("{job_title}", role)
                     
                     dashboard_df.at[s["email"], "Target"] = target
@@ -278,16 +234,19 @@ with tab_run:
                     table_ui.dataframe(dashboard_df, use_container_width=True)
 
                     try:
-                        if not is_dry: send_mail_html(s["creds"], s["email"], target, subj, final_body, st.secrets["DISPLAY_NAME"])
+                        if not is_dry: 
+                            send_mail_html(s["creds"], s["email"], target, subj, final_body, st.secrets["DISPLAY_NAME"])
+                        
                         s["idx"] += 1
                         sent_total += 1
                         dashboard_df.at[s["email"], "Sent"] = s["idx"]
                         dashboard_df.at[s["email"], "Status"] = "✅ Sent"
                     except Exception as e:
-                    # This will print the ACTUAL error message in the table so we can debug it
-                    error_msg = str(e).split(']')[0] # Keep it short enough to fit
-                    dashboard_df.at[s["email"], "Status"] = f"❌ {error_msg}"
-                    st.error(f"Detailed Error for {s['email']}: {e}") # Prints full details at bottom of screen
+                        # --- ERROR HANDLING FIX ---
+                        # Indented correctly now!
+                        error_msg = str(e).split(']')[0] 
+                        dashboard_df.at[s["email"], "Status"] = f"❌ {error_msg}"
+                        st.error(f"Detailed Error for {s['email']}: {e}")
                     
                     time.sleep(1)
                     table_ui.dataframe(dashboard_df, use_container_width=True)
@@ -299,7 +258,9 @@ with tab_run:
                 human_delay = delay + random.randint(-2, 2)
                 for sec in range(human_delay, 0, -1):
                     if st.session_state.stop_clicked: break
-                    for s in active_data: dashboard_df.at[s["email"], "Status"] = f"⏳ {sec}s"
+                    for s in active_data: 
+                        if "Auth" not in str(dashboard_df.at[s["email"], "Status"]) and "Error" not in str(dashboard_df.at[s["email"], "Status"]):
+                            dashboard_df.at[s["email"], "Status"] = f"⏳ {sec}s"
                     table_ui.dataframe(dashboard_df, use_container_width=True)
                     time.sleep(1)
 
