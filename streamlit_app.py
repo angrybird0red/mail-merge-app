@@ -35,26 +35,35 @@ def load_creds(email):
     
     if secret_key in st.secrets:
         try:
-            token_info = json.loads(st.secrets[secret_key])
+            # First load: Get the data from Secrets
+            token_data = st.secrets[secret_key]
             
-            # --- THE FIX: AUTO-FILL MISSING INFO ---
-            # If the token is missing the Client ID/Secret, grab them from the main config
-            # This prevents the "AttributeError: missing keys" crash
-            if "client_id" not in token_info:
+            # 1. Handle JSON parsing
+            try:
+                token_info = json.loads(token_data)
+            except:
+                # If it's not JSON, maybe it's already a dict?
+                token_info = token_data
+            
+            # 2. THE FIX: Double-Check if it's still a string (Double-Encoded)
+            if isinstance(token_info, str):
+                token_info = json.loads(token_info)
+
+            # 3. Auto-Fill Missing Client ID/Secret (The Safety Net)
+            if isinstance(token_info, dict) and "client_id" not in token_info:
                 main_config = json.loads(st.secrets["gcp_service_account"])
-                # Handle both 'web' and 'installed' formats just in case
                 app_info = main_config.get("web", main_config.get("installed", {}))
                 token_info["client_id"] = app_info.get("client_id")
                 token_info["client_secret"] = app_info.get("client_secret")
             
+            # 4. Create Credentials
             creds = Credentials.from_authorized_user_info(token_info)
             if creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             return creds
             
         except Exception as e:
-            # If a specific token is corrupted, print error but don't crash the whole app
-            st.error(f"⚠️ Error loading token for {email}: {e}")
+            st.error(f"⚠️ Token Error for {email}: {e}")
             return None
     return None
     
@@ -108,7 +117,8 @@ if "code" in st.query_params:
         
         st.success(f"✅ LOGIN SUCCESS FOR: {email_trying}")
         st.warning("⬇️ COPY THIS TOKEN BELOW AND PASTE INTO SECRETS ⬇️")
-        st.code(json.dumps(flow.credentials.to_json()), language="json")
+        # Just show the raw JSON string directly
+        st.code(flow.credentials.to_json(), language="json")
         st.stop() # Stop loading the rest of the app so you focus on copying
     except Exception as e:
         st.error(f"Login Error: {str(e)}")
