@@ -146,7 +146,7 @@ with tab_run:
             )
         
         with c2:
-            limit = st.number_input("Max Emails per Account", 1, 50, 20)
+            limit = st.number_input("Max Emails per Account", 1, 400, 20)
             delay = st.number_input("Delay (seconds)", 5, 120, 20)
             
         with c3:
