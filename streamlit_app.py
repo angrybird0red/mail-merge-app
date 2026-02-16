@@ -106,6 +106,34 @@ def get_full_sheet_data(creds, sheet_id, sheet_name):
         return res.get('values', []) if res.get('values') else []
     except: return []
 
+# --- SENDLOG DEDUPLICATION LOGIC ---
+def get_send_log(creds, sheet_id):
+    """Pulls the master SendLog to prevent duplicates across multiple runs."""
+    try:
+        sheets = build('sheets', 'v4', credentials=creds)
+        res = sheets.spreadsheets().values().get(spreadsheetId=sheet_id, range="SendLog!A:B").execute()
+        values = res.get('values', [])
+        return set((row[0].strip(), row[1].strip()) for row in values if len(row) >= 2)
+    except Exception as e:
+        print(f"Error reading SendLog: {e}")
+        return set()
+
+def append_to_send_log(creds, sheet_id, target_email, subject, sender_account):
+    """Appends a new record to the SendLog tab."""
+    try:
+        sheets = build('sheets', 'v4', credentials=creds)
+        timestamp = datetime.now().isoformat()
+        body = {'values': [[target_email, subject, sender_account, timestamp]]}
+        sheets.spreadsheets().values().append(
+            spreadsheetId=sheet_id,
+            range="SendLog!A:D",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body=body
+        ).execute()
+    except Exception as e:
+        print(f"Error appending to SendLog: {e}")
+
 def send_mail_html(creds, sender, to, subject, html_body, display_name):
     service = build('gmail', 'v1', credentials=creds)
     message = MIMEMultipart("alternative")
@@ -181,9 +209,13 @@ def fetch_all_threads(max_threads_per_account=10):
                     data = payload['body'].get('data')
                     if data: body_html.append(base64.urlsafe_b64decode(data.encode('UTF-8')).decode('utf-8'))
 
+                # Grabbing internal millisecond timestamp for precise chronological sorting
+                msg_time = msg.get('internalDate', '0')
+
                 thread_messages.append({
                     "From": sender,
                     "Date": headers.get('Date', ''),
+                    "Internal_Date": msg_time,
                     "Body": "".join(body_html) if body_html else "No HTML Body",
                     "Attachments": attachments,
                     "Message_ID": msg['id'],
@@ -193,14 +225,21 @@ def fetch_all_threads(max_threads_per_account=10):
             first_headers = {h['name']: h['value'] for h in messages[0]['payload']['headers']}
             last_headers = {h['name']: h['value'] for h in messages[-1]['payload']['headers']}
             
+            # Use the most recent message's timestamp to represent the thread's arrival time
+            last_msg_time = messages[-1].get('internalDate', '0')
+            
             master_inbox.append({
                 "Account": email,
                 "Thread_ID": th['id'],
                 "Subject": first_headers.get('Subject', 'No Subject'),
                 "Vendor_Email": vendor_email,
                 "Messages": thread_messages,
+                "Last_Message_Time": last_msg_time,
                 "Last_RFC_Message_ID": last_headers.get('Message-ID', '')
             })
+            
+    # CRITICAL FIX: Sort the entire aggregated list chronologically (Newest first)
+    master_inbox.sort(key=lambda x: int(x['Last_Message_Time']), reverse=True)
             
     return master_inbox
 
@@ -298,6 +337,10 @@ with tab_run:
         with st.status("🔍 Initializing System...") as status:
             admin_creds = load_creds(all_acc[0])
             subj, body_tmpl = get_jd_html(admin_creds, st.secrets["DOC_ID"])
+            
+            # Fetch the Master SendLog for deduplication
+            st.session_state.sent_history = get_send_log(admin_creds, st.secrets["SHEET_ID"])
+            
             active_data = []
             for s in sel_acc:
                 c = load_creds(s)
@@ -321,19 +364,28 @@ with tab_run:
                         if s["idx"] < len(s["rows"]):
                             round_active = True
                             row = s["rows"][s["idx"]]
-                            target = row[0]
+                            target = row[0].strip()
                             comp = row[1] if len(row) > 1 else "Your Company"
                             role = row[2] if len(row) > 2 else "the open position"
                             fname = target.split('@')[0].split('.')[0].capitalize()
                             
-                            final_body = body_tmpl.replace("{first_name}", fname).replace("{company}", comp).replace("{job_title}", role)
-                            
                             st.session_state.dashboard_df.at[s["email"], "Target"] = target
+                            
+                            # --- SENDLOG DEDUPLICATION LOGIC ---
+                            if (target, subj) in st.session_state.sent_history:
+                                st.session_state.dashboard_df.at[s["email"], "Status"] = "⏭️ Skipped (Already Sent)"
+                                s["idx"] += 1
+                                time.sleep(0.5)
+                                continue 
+                            
+                            final_body = body_tmpl.replace("{first_name}", fname).replace("{company}", comp).replace("{job_title}", role)
                             st.session_state.dashboard_df.at[s["email"], "Status"] = "📨 Sending..."
 
                             try:
                                 if not is_dry: 
                                     send_mail_html(s["creds"], s["email"], target, subj, final_body, display_name)
+                                    append_to_send_log(s["creds"], st.secrets["SHEET_ID"], target, subj, s["email"])
+                                    st.session_state.sent_history.add((target, subj))
                                 
                                 s["idx"] += 1
                                 st.session_state.sent_total += 1
@@ -352,7 +404,7 @@ with tab_run:
                         for sec in range(human_delay, 0, -1):
                             if st.session_state.stop_clicked: break
                             for s in st.session_state.active_data: 
-                                if "Auth" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]) and "Error" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]):
+                                if "Auth" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]) and "Error" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]) and "Skipped" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]):
                                     st.session_state.dashboard_df.at[s["email"], "Status"] = f"⏳ {sec}s"
                             time.sleep(1)
             finally:
@@ -362,7 +414,6 @@ with tab_run:
         add_script_run_ctx(thread)
         thread.start()
 
-    # Dynamic UI updating for background campaign utilizing st.fragment
     if st.session_state.campaign_running:
         @st.fragment(run_every="2s")
         def render_campaign_progress():
@@ -385,7 +436,6 @@ with tab_run:
         st.warning("🛑 Campaign Stopped.")
         st.dataframe(st.session_state.dashboard_df, use_container_width=True)
 
-
 # --- TAB: INBOX ---
 with tab_inbox:
     if "active_thread_id" not in st.session_state:
@@ -404,26 +454,37 @@ with tab_inbox:
             st.info("No active vendor conversations found.")
         else:
             st.divider()
-            h_col1, h_col2, h_col3, h_col4 = st.columns([2, 5, 2, 1])
+            # Updated to a 5-column layout to fit the Date
+            h_col1, h_col2, h_col3, h_col4, h_col5 = st.columns([2, 4, 2, 2, 1])
             h_col1.markdown("**Vendor**")
             h_col2.markdown("**Subject & Preview**")
             h_col3.markdown("**Account**")
-            h_col4.markdown("**Action**")
+            h_col4.markdown("**Date/Time**")
+            h_col5.markdown("**Action**")
             
             for em in emails:
                 st.markdown("<hr style='margin: 0px; padding: 0px; border-top: 1px solid #ddd;'>", unsafe_allow_html=True)
-                c1, c2, c3, c4 = st.columns([2, 5, 2, 1])
+                c1, c2, c3, c4, c5 = st.columns([2, 4, 2, 2, 1])
                 
                 sender = em['Vendor_Email'].split('<')[0].strip()[:20]
                 subj = em['Subject'][:40]
                 acc = em['Account'].split('@')[0]
-                snippet = em['Messages'][-1].get('Snippet', '')[:70]
+                snippet = em['Messages'][-1].get('Snippet', '')[:50]
+                
+                # Convert the internal millisecond timestamp to a readable UI date
+                try:
+                    timestamp_ms = int(em['Last_Message_Time'])
+                    dt_obj = datetime.fromtimestamp(timestamp_ms / 1000.0)
+                    formatted_date = dt_obj.strftime("%b %d, %I:%M %p")
+                except:
+                    formatted_date = "Unknown"
                 
                 c1.markdown(f"<div style='padding-top: 8px;'>👤 {sender}</div>", unsafe_allow_html=True)
                 c2.markdown(f"<div style='padding-top: 8px;'><b>{subj}</b> - <span style='color: gray;'>{snippet}...</span></div>", unsafe_allow_html=True)
                 c3.markdown(f"<div style='padding-top: 8px;'>📥 {acc}</div>", unsafe_allow_html=True)
+                c4.markdown(f"<div style='padding-top: 8px;'>🕒 {formatted_date}</div>", unsafe_allow_html=True)
                 
-                if c4.button("Open", key=f"open_{em['Thread_ID']}", use_container_width=True):
+                if c5.button("Open", key=f"open_{em['Thread_ID']}", use_container_width=True):
                     st.session_state.active_thread_id = em['Thread_ID']
                     st.rerun()
                     
@@ -465,7 +526,6 @@ with tab_inbox:
                         with col_b:
                             st.download_button(label="Download", data=att['data'], file_name=att['filename'], key=f"dl_{msg['Message_ID']}_{att['filename']}")
                         
-                        # --- ATTACHMENT PREVIEW ENGINE ---
                         with st.expander(f"👁️ Preview {att['filename']}"):
                             fname_lower = att['filename'].lower()
                             try:
