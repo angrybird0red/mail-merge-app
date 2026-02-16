@@ -227,15 +227,15 @@ def fetch_all_threads(max_threads_per_account=10):
                 body_html = []
                 
                 if 'parts' in payload:
-                    parse_email_parts(service, 'me', msg['id'], payload['parts'], attachments, body_html) [cite: 29]
+                    parse_email_parts(service, 'me', msg['id'], payload['parts'], attachments, body_html)
                 else:
-                    data = payload['body'].get('data') [cite: 30]
-                    if data: body_html.append(base64.urlsafe_b64decode(data.encode('UTF-8')).decode('utf-8')) [cite: 30]
+                    data = payload['body'].get('data')
+                    if data: body_html.append(base64.urlsafe_b64decode(data.encode('UTF-8')).decode('utf-8'))
 
                 thread_messages.append({
                     "From": sender,
                     "Date": headers.get('Date', ''),
-                    "Body": "".join(body_html) if body_html else "No HTML Body", [cite: 31]
+                    "Body": "".join(body_html) if body_html else "No HTML Body",
                     "Attachments": attachments,
                     "Message_ID": msg['id']
                 })
@@ -424,9 +424,9 @@ with tab_run:
 
 # --- TAB: INBOX ---
 with tab_inbox:
-    col_head1, col_head2 = st.columns([4, 1]) [cite: 54]
+    col_head1, col_head2 = st.columns([4, 1])
     col_head1.subheader("📥 Unified Vendor Inbox")
-    if col_head2.button("🔄 Refresh", use_container_width=True): [cite: 54]
+    if col_head2.button("🔄 Refresh", use_container_width=True):
         fetch_all_threads.clear()
         st.rerun()
         
@@ -435,14 +435,14 @@ with tab_inbox:
     if not emails:
         st.info("No active vendor conversations found.")
     else:
-        # Split layout: List on the left, threaded reader on the right [cite: 55]
-        col_list, col_view = st.columns([1, 2.5]) [cite: 55]
+        # Split layout: List on the left, threaded reader on the right
+        col_list, col_view = st.columns([1, 2.5])
         
         with col_list:
             selected_index = st.radio(
                 "Conversations", 
-                range(len(emails)), [cite: 56]
-                format_func=lambda x: f"{emails[x]['Account'].split('@')[0]}\n↳ {emails[x]['Vendor_Email'][:18]}..." [cite: 56]
+                range(len(emails)),
+                format_func=lambda x: f"{emails[x]['Account'].split('@')[0]}\n↳ {emails[x]['Vendor_Email'][:18]}..."
             )
             
         selected_thread = emails[selected_index]
@@ -452,8 +452,8 @@ with tab_inbox:
             st.caption(f"**Vendor:** `{selected_thread['Vendor_Email']}` | **Via:** `{selected_thread['Account']}`")
             st.divider()
             
-            # The scrollable container that holds the threaded chat [cite: 57]
-            with st.container(height=500, border=True): [cite: 57]
+            # The scrollable container that holds the threaded chat
+            with st.container(height=500, border=True):
                 for msg in selected_thread["Messages"]:
                     is_me = selected_thread["Account"] in msg["From"]
                     
@@ -465,30 +465,30 @@ with tab_inbox:
                         else:
                             st.markdown(f"🔵 **Vendor** - {msg['From']} (`{msg['Date']}`)")
                         
-                        st.html(msg["Body"]) [cite: 57]
+                        st.html(msg["Body"])
                         
-                        if msg["Attachments"]: [cite: 58]
-                            for att in msg["Attachments"]: [cite: 58]
-                                st.download_button(label=f"📎 {att['filename']}", data=att['data'], file_name=att['filename'], key=f"att_{msg['Message_ID']}") [cite: 58]
+                        if msg["Attachments"]:
+                            for att in msg["Attachments"]:
+                                st.download_button(label=f"📎 {att['filename']}", data=att['data'], file_name=att['filename'], key=f"att_{msg['Message_ID']}")
 
             st.divider()
-            st.markdown("#### Quick Reply") [cite: 59]
-            reply_body = st.text_area("Message:", key=f"reply_{selected_thread['Thread_ID']}") [cite: 59]
+            st.markdown("#### Quick Reply")
+            reply_body = st.text_area("Message:", key=f"reply_{selected_thread['Thread_ID']}")
             
-            if st.button("Send Reply", type="primary", key=f"btn_{selected_thread['Thread_ID']}"): [cite: 59]
-                if reply_body.strip(): [cite: 59]
-                    with st.spinner("Sending..."): [cite: 60]
+            if st.button("Send Reply", type="primary", key=f"btn_{selected_thread['Thread_ID']}"):
+                if reply_body.strip():
+                    with st.spinner("Sending..."):
                         send_inbox_reply(
-                            email=selected_thread["Account"], [cite: 60]
-                            thread_id=selected_thread["Thread_ID"], [cite: 60]
+                            email=selected_thread["Account"],
+                            thread_id=selected_thread["Thread_ID"],
                             rfc_message_id=selected_thread["Last_RFC_Message_ID"],
                             to_address=selected_thread["Vendor_Email"], # Guaranteed to reply to the vendor, never yourself
-                            subject=selected_thread["Subject"], [cite: 61]
-                            body_text=reply_body [cite: 62]
+                            subject=selected_thread["Subject"],
+                            body_text=reply_body
                         )
                     st.success("Reply sent and attached to thread!")
-                    time.sleep(1) [cite: 62]
+                    time.sleep(1)
                     fetch_all_threads.clear()
-                    st.rerun() [cite: 63]
+                    st.rerun()
                 else:
-                    st.error("Cannot send an empty message.") [cite: 63]
+                    st.error("Cannot send an empty message.")
