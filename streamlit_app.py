@@ -362,18 +362,25 @@ with tab_run:
         add_script_run_ctx(thread)
         thread.start()
 
-    # Dynamic UI updating for background campaign
+    # Dynamic UI updating for background campaign utilizing st.fragment
     if st.session_state.campaign_running:
-        st.info("🚀 Campaign is running in the background. You can safely switch to the Inbox tab!")
-        prog = st.session_state.sent_total / max(1, st.session_state.total_goal)
-        st.progress(prog, text=f"Sent {st.session_state.sent_total} / {st.session_state.total_goal}")
-        st.dataframe(st.session_state.dashboard_df, use_container_width=True)
-        time.sleep(2)
-        st.rerun()
+        @st.fragment(run_every="2s")
+        def render_campaign_progress():
+            if st.session_state.campaign_running:
+                st.info("🚀 Campaign is running in the background. You can safely switch to the Inbox tab!")
+                prog = st.session_state.sent_total / max(1, st.session_state.total_goal)
+                st.progress(prog, text=f"Sent {st.session_state.sent_total} / {st.session_state.total_goal}")
+                st.dataframe(st.session_state.dashboard_df, use_container_width=True)
+            else:
+                st.rerun()
+                
+        render_campaign_progress()
+        
     elif getattr(st.session_state, 'sent_total', 0) > 0 and not st.session_state.stop_clicked:
         st.success("✅ Campaign Completed!")
         st.progress(1.0, text=f"Sent {st.session_state.sent_total} / {st.session_state.total_goal}")
         st.dataframe(st.session_state.dashboard_df, use_container_width=True)
+        
     elif st.session_state.stop_clicked and hasattr(st.session_state, 'dashboard_df'):
         st.warning("🛑 Campaign Stopped.")
         st.dataframe(st.session_state.dashboard_df, use_container_width=True)
