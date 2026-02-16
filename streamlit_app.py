@@ -11,6 +11,7 @@ import base64
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
+from email.message import EmailMessage
 
 # Google Libraries
 from google.oauth2.credentials import Credentials
@@ -163,6 +164,89 @@ def send_mail_html(creds, sender, to, subject, html_body, display_name):
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     service.users().messages().send(userId="me", body={'raw': raw}).execute()
 
+# --- NEW INBOX LOGIC ---
+def parse_email_parts(service, user_id, msg_id, parts, attachments, body_html):
+    for part in parts:
+        mime_type = part.get('mimeType')
+        filename = part.get('filename')
+        
+        if mime_type == 'text/html' and not filename:
+            data = part['body'].get('data')
+            if data:
+                decoded = base64.urlsafe_b64decode(data.encode('UTF-8')).decode('utf-8')
+                body_html.append(decoded)
+                
+        if filename:
+            attachment_id = part['body'].get('attachmentId')
+            data = part['body'].get('data')
+            if attachment_id:
+                att = service.users().messages().attachments().get(userId=user_id, messageId=msg_id, id=attachment_id).execute()
+                data = att.get('data')
+            if data:
+                attachments.append({"filename": filename, "data": base64.urlsafe_b64decode(data.encode('UTF-8'))})
+                
+        if 'parts' in part:
+            parse_email_parts(service, user_id, msg_id, part['parts'], attachments, body_html)
+
+@st.cache_data(ttl=60)
+def fetch_all_inboxes(max_emails_per_account=5):
+    master_inbox = []
+    accounts = json.loads(st.secrets.get("DUMMY_ACCOUNTS", "[]"))
+    
+    for email in accounts:
+        creds = load_creds(email)
+        if not creds: continue
+        
+        service = build('gmail', 'v1', credentials=creds)
+        
+        # specifically fetch unread emails and exclude bounces
+        results = service.users().messages().list(userId='me', maxResults=max_emails_per_account, q='-from:mailer-daemon is:unread').execute()
+        messages = results.get('messages', [])
+        
+        for msg in messages:
+            msg_data = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
+            payload = msg_data['payload']
+            headers = {h['name']: h['value'] for h in payload['headers']}
+            
+            attachments = []
+            body_html = []
+            
+            if 'parts' in payload:
+                parse_email_parts(service, 'me', msg['id'], payload['parts'], attachments, body_html)
+            else:
+                data = payload['body'].get('data')
+                if data: body_html.append(base64.urlsafe_b64decode(data.encode('UTF-8')).decode('utf-8'))
+
+            master_inbox.append({
+                "Account": email,
+                "From": headers.get('From', 'Unknown'),
+                "Subject": headers.get('Subject', 'No Subject'),
+                "Date": headers.get('Date', ''),
+                "Body": "".join(body_html) if body_html else "No HTML Body",
+                "Attachments": attachments,
+                "Thread_ID": msg['threadId'],
+                "RFC_Message_ID": headers.get('Message-ID', ''),
+                "Message_ID": msg['id']
+            })
+    return master_inbox
+
+def send_inbox_reply(email, thread_id, rfc_message_id, to_address, subject, body_text):
+    creds = load_creds(email)
+    service = build('gmail', 'v1', credentials=creds)
+    
+    message = EmailMessage()
+    message.set_content(body_text)
+    message['To'] = to_address
+    message['Subject'] = subject if subject.startswith("Re:") else f"Re: {subject}"
+    message['In-Reply-To'] = rfc_message_id
+    message['References'] = rfc_message_id
+    
+    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+    service.users().messages().send(userId='me', body={'raw': raw_message, 'threadId': thread_id}).execute()
+    
+    # mark as read so it disappears from the unread queue
+    service.users().messages().modify(userId='me', id=rfc_message_id, body={'removeLabelIds': ['UNREAD']}).execute()
+
 # --- 2. UI SETUP ---
 st.title("👔 Simple Merge")
 
@@ -184,7 +268,7 @@ if "code" in st.query_params:
 
 # --- 3. TABS ---
 if 'stop_clicked' not in st.session_state: st.session_state.stop_clicked = False
-tab_run, tab_preview, tab_auth = st.tabs(["⚡ Operations", "👁️ Preview", "⚙️ Accounts"])
+tab_run, tab_preview, tab_auth, tab_inbox = st.tabs(["⚡ Operations", "👁️ Preview", "⚙️ Accounts", "📥 Inbox"])
 
 # --- TAB: ACCOUNTS ---
 with tab_auth:
@@ -312,3 +396,65 @@ with tab_run:
                     time.sleep(1)
 
         st.balloons()
+
+# --- TAB: INBOX ---
+with tab_inbox:
+    col_head1, col_head2 = st.columns([4, 1])
+    col_head1.subheader("📥 Unified Vendor Inbox")
+    if col_head2.button("🔄 Refresh", use_container_width=True):
+        fetch_all_inboxes.clear()
+        st.rerun()
+        
+    emails = fetch_all_inboxes()
+    
+    if not emails:
+        st.info("No unread vendor replies found. Check back later!")
+    else:
+        # split layout: list on the left, reader on the right
+        col_list, col_view = st.columns([1, 2.5])
+        
+        with col_list:
+            selected_index = st.radio(
+                "Unread Messages", 
+                range(len(emails)), 
+                format_func=lambda x: f"{emails[x]['Account'].split('@')[0]}\n↳ {emails[x]['From'][:15]}..."
+            )
+            
+        selected_email = emails[selected_index]
+        
+        with col_view:
+            st.markdown(f"### {selected_email['Subject']}")
+            st.caption(f"**From:** `{selected_email['From']}` | **Received at:** `{selected_email['Account']}`")
+            st.divider()
+            
+            # renders the html in a scrollable container so huge emails don't break the page
+            with st.container(height=400, border=True):
+                st.html(selected_email["Body"])
+                
+            if selected_email["Attachments"]:
+                st.write("**Attachments:**")
+                for att in selected_email["Attachments"]:
+                    st.download_button(label=f"📎 {att['filename']}", data=att['data'], file_name=att['filename'])
+            
+            st.divider()
+            st.markdown("#### Quick Reply")
+            # unique keys prevent streamlit from mixing up text areas between emails
+            reply_body = st.text_area("Message:", key=f"reply_{selected_email['Message_ID']}")
+            
+            if st.button("Send Reply", type="primary", key=f"btn_{selected_email['Message_ID']}"):
+                if reply_body.strip():
+                    with st.spinner("Sending..."):
+                        send_inbox_reply(
+                            email=selected_email["Account"],
+                            thread_id=selected_email["Thread_ID"],
+                            rfc_message_id=selected_email["RFC_Message_ID"],
+                            to_address=selected_email["From"],
+                            subject=selected_email["Subject"],
+                            body_text=reply_body
+                        )
+                    st.success("Reply sent and marked as read!")
+                    time.sleep(1)
+                    fetch_all_inboxes.clear()
+                    st.rerun()
+                else:
+                    st.error("Cannot send an empty message.")
