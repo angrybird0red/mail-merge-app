@@ -25,6 +25,7 @@ st.set_page_config(page_title="Simple Merge", page_icon="👔", layout="wide")
 # We use Drive API for HTML export to keep 1:1 formatting
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/gmail.modify', # <-- ADD THIS NEW LINE
     'https://www.googleapis.com/auth/documents.readonly',
     'https://www.googleapis.com/auth/drive.readonly', 
     'https://www.googleapis.com/auth/spreadsheets'
