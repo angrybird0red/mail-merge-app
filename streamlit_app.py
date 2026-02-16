@@ -190,7 +190,7 @@ def parse_email_parts(service, user_id, msg_id, parts, attachments, body_html):
             parse_email_parts(service, user_id, msg_id, part['parts'], attachments, body_html)
 
 @st.cache_data(ttl=60)
-def fetch_all_inboxes(max_emails_per_account=5):
+def fetch_all_threads(max_threads_per_account=10):
     master_inbox = []
     accounts = json.loads(st.secrets.get("DUMMY_ACCOUNTS", "[]"))
     
@@ -200,35 +200,59 @@ def fetch_all_inboxes(max_emails_per_account=5):
         
         service = build('gmail', 'v1', credentials=creds)
         
-        # specifically fetch unread emails and exclude bounces
-        results = service.users().messages().list(userId='me', maxResults=max_emails_per_account, q='-from:mailer-daemon is:unread').execute()
-        messages = results.get('messages', [])
+        # CHANGED: Fetch whole threads from the inbox, ignoring bounces 
+        results = service.users().threads().list(userId='me', maxResults=max_threads_per_account, q='in:inbox -from:mailer-daemon').execute()
+        threads = results.get('threads', [])
         
-        for msg in messages:
-            msg_data = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
-            payload = msg_data['payload']
-            headers = {h['name']: h['value'] for h in payload['headers']}
+        for th in threads:
+            th_data = service.users().threads().get(userId='me', id=th['id'], format='full').execute()
+            messages = th_data.get('messages', [])
+            if not messages: continue
             
-            attachments = []
-            body_html = []
+            thread_messages = []
+            vendor_email = "Unknown"
             
-            if 'parts' in payload:
-                parse_email_parts(service, 'me', msg['id'], payload['parts'], attachments, body_html)
-            else:
-                data = payload['body'].get('data')
-                if data: body_html.append(base64.urlsafe_b64decode(data.encode('UTF-8')).decode('utf-8'))
+            # Extract data for every single message inside this thread
+            for msg in messages:
+                payload = msg['payload']
+                headers = {h['name']: h['value'] for h in payload['headers']}
+                
+                sender = headers.get('From', 'Unknown')
+                
+                # Identify the vendor by finding the first email address that isn't yours
+                if email not in sender:
+                    vendor_email = sender
+                    
+                attachments = []
+                body_html = []
+                
+                if 'parts' in payload:
+                    parse_email_parts(service, 'me', msg['id'], payload['parts'], attachments, body_html) [cite: 29]
+                else:
+                    data = payload['body'].get('data') [cite: 30]
+                    if data: body_html.append(base64.urlsafe_b64decode(data.encode('UTF-8')).decode('utf-8')) [cite: 30]
 
+                thread_messages.append({
+                    "From": sender,
+                    "Date": headers.get('Date', ''),
+                    "Body": "".join(body_html) if body_html else "No HTML Body", [cite: 31]
+                    "Attachments": attachments,
+                    "Message_ID": msg['id']
+                })
+
+            # Pull the overarching thread info (Subject from first message, ID from last)
+            first_headers = {h['name']: h['value'] for h in messages[0]['payload']['headers']}
+            last_headers = {h['name']: h['value'] for h in messages[-1]['payload']['headers']}
+            
             master_inbox.append({
                 "Account": email,
-                "From": headers.get('From', 'Unknown'),
-                "Subject": headers.get('Subject', 'No Subject'),
-                "Date": headers.get('Date', ''),
-                "Body": "".join(body_html) if body_html else "No HTML Body",
-                "Attachments": attachments,
-                "Thread_ID": msg['threadId'],
-                "RFC_Message_ID": headers.get('Message-ID', ''),
-                "Message_ID": msg['id']
+                "Thread_ID": th['id'],
+                "Subject": first_headers.get('Subject', 'No Subject'),
+                "Vendor_Email": vendor_email,
+                "Messages": thread_messages, # We now store the whole conversation array
+                "Last_RFC_Message_ID": last_headers.get('Message-ID', '')
             })
+            
     return master_inbox
 
 def send_inbox_reply(email, thread_id, rfc_message_id, to_address, subject, body_text):
@@ -400,62 +424,71 @@ with tab_run:
 
 # --- TAB: INBOX ---
 with tab_inbox:
-    col_head1, col_head2 = st.columns([4, 1])
+    col_head1, col_head2 = st.columns([4, 1]) [cite: 54]
     col_head1.subheader("📥 Unified Vendor Inbox")
-    if col_head2.button("🔄 Refresh", use_container_width=True):
-        fetch_all_inboxes.clear()
+    if col_head2.button("🔄 Refresh", use_container_width=True): [cite: 54]
+        fetch_all_threads.clear()
         st.rerun()
         
-    emails = fetch_all_inboxes()
+    emails = fetch_all_threads()
     
     if not emails:
-        st.info("No unread vendor replies found. Check back later!")
+        st.info("No active vendor conversations found.")
     else:
-        # split layout: list on the left, reader on the right
-        col_list, col_view = st.columns([1, 2.5])
+        # Split layout: List on the left, threaded reader on the right [cite: 55]
+        col_list, col_view = st.columns([1, 2.5]) [cite: 55]
         
         with col_list:
             selected_index = st.radio(
-                "Unread Messages", 
-                range(len(emails)), 
-                format_func=lambda x: f"{emails[x]['Account'].split('@')[0]}\n↳ {emails[x]['From'][:15]}..."
+                "Conversations", 
+                range(len(emails)), [cite: 56]
+                format_func=lambda x: f"{emails[x]['Account'].split('@')[0]}\n↳ {emails[x]['Vendor_Email'][:18]}..." [cite: 56]
             )
             
-        selected_email = emails[selected_index]
+        selected_thread = emails[selected_index]
         
         with col_view:
-            st.markdown(f"### {selected_email['Subject']}")
-            st.caption(f"**From:** `{selected_email['From']}` | **Received at:** `{selected_email['Account']}`")
+            st.markdown(f"### {selected_thread['Subject']}")
+            st.caption(f"**Vendor:** `{selected_thread['Vendor_Email']}` | **Via:** `{selected_thread['Account']}`")
             st.divider()
             
-            # renders the html in a scrollable container so huge emails don't break the page
-            with st.container(height=400, border=True):
-                st.html(selected_email["Body"])
-                
-            if selected_email["Attachments"]:
-                st.write("**Attachments:**")
-                for att in selected_email["Attachments"]:
-                    st.download_button(label=f"📎 {att['filename']}", data=att['data'], file_name=att['filename'])
-            
+            # The scrollable container that holds the threaded chat [cite: 57]
+            with st.container(height=500, border=True): [cite: 57]
+                for msg in selected_thread["Messages"]:
+                    is_me = selected_thread["Account"] in msg["From"]
+                    
+                    # Draw a neat box around each individual message in the thread
+                    with st.container(border=True):
+                        # Visual indicators for who sent what
+                        if is_me:
+                            st.markdown(f"🟢 **You** (`{msg['Date']}`)")
+                        else:
+                            st.markdown(f"🔵 **Vendor** - {msg['From']} (`{msg['Date']}`)")
+                        
+                        st.html(msg["Body"]) [cite: 57]
+                        
+                        if msg["Attachments"]: [cite: 58]
+                            for att in msg["Attachments"]: [cite: 58]
+                                st.download_button(label=f"📎 {att['filename']}", data=att['data'], file_name=att['filename'], key=f"att_{msg['Message_ID']}") [cite: 58]
+
             st.divider()
-            st.markdown("#### Quick Reply")
-            # unique keys prevent streamlit from mixing up text areas between emails
-            reply_body = st.text_area("Message:", key=f"reply_{selected_email['Message_ID']}")
+            st.markdown("#### Quick Reply") [cite: 59]
+            reply_body = st.text_area("Message:", key=f"reply_{selected_thread['Thread_ID']}") [cite: 59]
             
-            if st.button("Send Reply", type="primary", key=f"btn_{selected_email['Message_ID']}"):
-                if reply_body.strip():
-                    with st.spinner("Sending..."):
+            if st.button("Send Reply", type="primary", key=f"btn_{selected_thread['Thread_ID']}"): [cite: 59]
+                if reply_body.strip(): [cite: 59]
+                    with st.spinner("Sending..."): [cite: 60]
                         send_inbox_reply(
-                            email=selected_email["Account"],
-                            thread_id=selected_email["Thread_ID"],
-                            rfc_message_id=selected_email["RFC_Message_ID"],
-                            to_address=selected_email["From"],
-                            subject=selected_email["Subject"],
-                            body_text=reply_body
+                            email=selected_thread["Account"], [cite: 60]
+                            thread_id=selected_thread["Thread_ID"], [cite: 60]
+                            rfc_message_id=selected_thread["Last_RFC_Message_ID"],
+                            to_address=selected_thread["Vendor_Email"], # Guaranteed to reply to the vendor, never yourself
+                            subject=selected_thread["Subject"], [cite: 61]
+                            body_text=reply_body [cite: 62]
                         )
-                    st.success("Reply sent and marked as read!")
-                    time.sleep(1)
-                    fetch_all_inboxes.clear()
-                    st.rerun()
+                    st.success("Reply sent and attached to thread!")
+                    time.sleep(1) [cite: 62]
+                    fetch_all_threads.clear()
+                    st.rerun() [cite: 63]
                 else:
-                    st.error("Cannot send an empty message.")
+                    st.error("Cannot send an empty message.") [cite: 63]
