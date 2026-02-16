@@ -7,13 +7,11 @@ import re
 from datetime import datetime
 import base64
 
-# --- NEW IMPORTS FOR ROBUST HTML EMAILS ---
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
 from email.message import EmailMessage
 
-# Google Libraries
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
@@ -186,7 +184,8 @@ def fetch_all_threads(max_threads_per_account=10):
                     "Date": headers.get('Date', ''),
                     "Body": "".join(body_html) if body_html else "No HTML Body",
                     "Attachments": attachments,
-                    "Message_ID": msg['id']
+                    "Message_ID": msg['id'],
+                    "Snippet": msg.get('snippet', '') # Pulls native API snippet to bypass CSS text leaking
                 })
 
             first_headers = {h['name']: h['value'] for h in messages[0]['payload']['headers']}
@@ -359,93 +358,106 @@ with tab_run:
 
 # --- TAB: INBOX ---
 with tab_inbox:
-    col_head1, col_head2 = st.columns([4, 1])
-    col_head1.subheader("📥 Unified Vendor Inbox")
-    if col_head2.button("🔄 Refresh", use_container_width=True):
-        fetch_all_threads.clear()
-        st.rerun()
-        
-    emails = fetch_all_threads()
-    
-    if not emails:
-        st.info("No active vendor conversations found.")
-    else:
-        # initialize session state to handle active conversation selections
-        if "selected_inbox_idx" not in st.session_state:
-            st.session_state.selected_inbox_idx = 0
-            
-        # safety catch if the inbox list shrinks after a refresh
-        if st.session_state.selected_inbox_idx >= len(emails):
-            st.session_state.selected_inbox_idx = 0
+    # Set up session state for master-detail view toggle
+    if "active_thread_id" not in st.session_state:
+        st.session_state.active_thread_id = None
 
-        # expanded left column for multi-line text
-        col_list, col_view = st.columns([1.2, 2.5])
+    if st.session_state.active_thread_id is None:
+        # --- LIST VIEW (Like Gmail) ---
+        c_head, c_btn = st.columns([4, 1])
+        c_head.subheader("📥 Unified Vendor Inbox")
+        if c_btn.button("🔄 Refresh Inbox", use_container_width=True):
+            fetch_all_threads.clear()
+            st.rerun()
+            
+        emails = fetch_all_threads()
         
-        with col_list:
-            st.markdown("##### Conversations")
-            # scrollable container so the whole page doesn't stretch down
-            with st.container(height=500, border=False):
-                for i, em in enumerate(emails):
-                    sender = em['Vendor_Email'].split('<')[0].strip()[:25]
-                    subj = em['Subject'][:32]
-                    subj = subj + "..." if len(em['Subject']) > 32 else subj
-                    acc = em['Account'].split('@')[0]
-                    
-                    # strip html tags from the body of the last message to create a clean snippet
-                    last_msg_raw = em['Messages'][-1]['Body']
-                    clean_snippet = re.sub('<[^<]+>', '', last_msg_raw).strip()
-                    snippet = clean_snippet[:40] + "..." if len(clean_snippet) > 40 else clean_snippet
-                    
-                    # \n renders natively as multi-line inside Streamlit buttons
-                    label = f"👤 {sender}\n📄 {subj}\n💬 {snippet}\n📥 {acc}"
-                    
-                    btn_type = "primary" if st.session_state.selected_inbox_idx == i else "secondary"
-                    
-                    if st.button(label, key=f"btn_thread_{em['Thread_ID']}", use_container_width=True, type=btn_type):
-                        st.session_state.selected_inbox_idx = i
-                        st.rerun()
-            
-        selected_thread = emails[st.session_state.selected_inbox_idx]
-        
-        with col_view:
-            st.markdown(f"### {selected_thread['Subject']}")
-            st.caption(f"**Vendor:** `{selected_thread['Vendor_Email']}` | **Via:** `{selected_thread['Account']}`")
+        if not emails:
+            st.info("No active vendor conversations found.")
+        else:
             st.divider()
+            # Header Row
+            h_col1, h_col2, h_col3, h_col4 = st.columns([2, 5, 2, 1])
+            h_col1.markdown("**Vendor**")
+            h_col2.markdown("**Subject & Preview**")
+            h_col3.markdown("**Account**")
+            h_col4.markdown("**Action**")
             
-            with st.container(height=500, border=True):
-                for msg in selected_thread["Messages"]:
-                    is_me = selected_thread["Account"] in msg["From"]
-                    
-                    with st.container(border=True):
-                        if is_me:
-                            st.markdown(f"🟢 **You** (`{msg['Date']}`)")
-                        else:
-                            st.markdown(f"🔵 **Vendor** - {msg['From']} (`{msg['Date']}`)")
-                        
-                        st.html(msg["Body"])
-                        
-                        if msg["Attachments"]:
-                            for att in msg["Attachments"]:
-                                st.download_button(label=f"📎 {att['filename']}", data=att['data'], file_name=att['filename'], key=f"att_{msg['Message_ID']}")
-
-            st.divider()
-            st.markdown("#### Quick Reply")
-            reply_body = st.text_area("Message:", key=f"reply_{selected_thread['Thread_ID']}")
-            
-            if st.button("Send Reply", type="primary", key=f"btn_{selected_thread['Thread_ID']}"):
-                if reply_body.strip():
-                    with st.spinner("Sending..."):
-                        send_inbox_reply(
-                            email=selected_thread["Account"],
-                            thread_id=selected_thread["Thread_ID"],
-                            rfc_message_id=selected_thread["Last_RFC_Message_ID"],
-                            to_address=selected_thread["Vendor_Email"],
-                            subject=selected_thread["Subject"],
-                            body_text=reply_body
-                        )
-                    st.success("Reply sent and attached to thread!")
-                    time.sleep(1)
-                    fetch_all_threads.clear()
+            # Data Rows
+            for em in emails:
+                st.markdown("<hr style='margin: 0px; padding: 0px; border-top: 1px solid #ddd;'>", unsafe_allow_html=True)
+                c1, c2, c3, c4 = st.columns([2, 5, 2, 1])
+                
+                # Format text lengths so columns don't break
+                sender = em['Vendor_Email'].split('<')[0].strip()[:20]
+                subj = em['Subject'][:40]
+                acc = em['Account'].split('@')[0]
+                snippet = em['Messages'][-1].get('Snippet', '')[:70]
+                
+                # Use st.markdown with padding to align text vertically with the button
+                c1.markdown(f"<div style='padding-top: 8px;'>👤 {sender}</div>", unsafe_allow_html=True)
+                c2.markdown(f"<div style='padding-top: 8px;'><b>{subj}</b> - <span style='color: gray;'>{snippet}...</span></div>", unsafe_allow_html=True)
+                c3.markdown(f"<div style='padding-top: 8px;'>📥 {acc}</div>", unsafe_allow_html=True)
+                
+                if c4.button("Open", key=f"open_{em['Thread_ID']}", use_container_width=True):
+                    st.session_state.active_thread_id = em['Thread_ID']
                     st.rerun()
+                    
+            st.markdown("<hr style='margin: 0px; padding: 0px; border-top: 1px solid #ddd;'>", unsafe_allow_html=True)
+
+    else:
+        # --- FULL THREAD VIEW ---
+        emails = fetch_all_threads()
+        selected_thread = next((t for t in emails if t['Thread_ID'] == st.session_state.active_thread_id), None)
+        
+        # Failsafe if the thread disappears from the API fetch
+        if not selected_thread:
+            st.session_state.active_thread_id = None
+            st.rerun()
+
+        if st.button("⬅️ Back to Inbox"):
+            st.session_state.active_thread_id = None
+            st.rerun()
+            
+        st.markdown(f"### {selected_thread['Subject']}")
+        st.caption(f"**Vendor:** `{selected_thread['Vendor_Email']}` | **Via:** `{selected_thread['Account']}`")
+        st.divider()
+        
+        # Thread History rendering
+        for msg in selected_thread["Messages"]:
+            is_me = selected_thread["Account"] in msg["From"]
+            
+            with st.container(border=True):
+                if is_me:
+                    st.markdown(f"🟢 **You** (`{msg['Date']}`)")
                 else:
-                    st.error("Cannot send an empty message.")
+                    st.markdown(f"🔵 **Vendor** - {msg['From']} (`{msg['Date']}`)")
+                
+                st.html(msg["Body"])
+                
+                if msg["Attachments"]:
+                    for att in msg["Attachments"]:
+                        st.download_button(label=f"📎 {att['filename']}", data=att['data'], file_name=att['filename'], key=f"att_{msg['Message_ID']}")
+
+        st.divider()
+        st.markdown("#### Quick Reply")
+        reply_body = st.text_area("Message:", key=f"reply_{selected_thread['Thread_ID']}")
+        
+        if st.button("Send Reply", type="primary", key=f"btn_{selected_thread['Thread_ID']}"):
+            if reply_body.strip():
+                with st.spinner("Sending..."):
+                    send_inbox_reply(
+                        email=selected_thread["Account"],
+                        thread_id=selected_thread["Thread_ID"],
+                        rfc_message_id=selected_thread["Last_RFC_Message_ID"],
+                        to_address=selected_thread["Vendor_Email"],
+                        subject=selected_thread["Subject"],
+                        body_text=reply_body
+                    )
+                st.success("Reply sent and attached to thread!")
+                time.sleep(1)
+                fetch_all_threads.clear()
+                st.session_state.active_thread_id = None # Kick user back to inbox list on send
+                st.rerun()
+            else:
+                st.error("Cannot send an empty message.")
