@@ -21,11 +21,10 @@ from google.auth.transport.requests import Request
 
 st.set_page_config(page_title="Simple Merge", page_icon="👔", layout="wide")
 
-# --- 1. CORE LOGIC (FORMATTING FIX) ---
-# We use Drive API for HTML export to keep 1:1 formatting
+# --- 1. CORE LOGIC ---
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.send',
-    'https://www.googleapis.com/auth/gmail.modify', # <-- ADD THIS NEW LINE
+    'https://www.googleapis.com/auth/gmail.modify',
     'https://www.googleapis.com/auth/documents.readonly',
     'https://www.googleapis.com/auth/drive.readonly', 
     'https://www.googleapis.com/auth/spreadsheets'
@@ -35,34 +34,26 @@ def get_client_config():
     return json.loads(st.secrets["gcp_service_account"])
 
 def load_creds(email):
-    # Standardize key format
     safe_email = email.replace("@", "_").replace(".", "_").upper()
     secret_key = f"TOKEN_{safe_email}"
     
     if secret_key in st.secrets:
         try:
-            # First load: Get the data from Secrets
             token_data = st.secrets[secret_key]
-            
-            # 1. Handle JSON parsing
             try:
                 token_info = json.loads(token_data)
             except:
-                # If it's not JSON, maybe it's already a dict?
                 token_info = token_data
             
-            # 2. THE FIX: Double-Check if it's still a string (Double-Encoded)
             if isinstance(token_info, str):
                 token_info = json.loads(token_info)
 
-            # 3. Auto-Fill Missing Client ID/Secret (The Safety Net)
             if isinstance(token_info, dict) and "client_id" not in token_info:
                 main_config = json.loads(st.secrets["gcp_service_account"])
                 app_info = main_config.get("web", main_config.get("installed", {}))
                 token_info["client_id"] = app_info.get("client_id")
                 token_info["client_secret"] = app_info.get("client_secret")
             
-            # 4. Create Credentials
             creds = Credentials.from_authorized_user_info(token_info)
             if creds.expired and creds.refresh_token:
                 creds.refresh(Request())
@@ -74,68 +65,36 @@ def load_creds(email):
     return None
 
 def get_jd_html(creds, doc_id):
-    """Exports Google Doc and aggressively strips top gaps for Gmail."""
     drive_service = build('drive', 'v3', credentials=creds)
     html_content = drive_service.files().export(fileId=doc_id, mimeType='text/html').execute()
     decoded_html = html_content.decode('utf-8')
     
-    # --- PHASE 1: THE VACUUM CLEANER (Global Spacing) ---
-    # Strip all specific pt/px margins and paddings from the Doc
     decoded_html = re.sub(r'margin-top:\s*[\d\.]+(pt|px|cm|in);?', 'margin-top: 0 !important;', decoded_html)
     decoded_html = re.sub(r'margin-bottom:\s*[\d\.]+(pt|px|cm|in);?', 'margin-bottom: 0 !important;', decoded_html)
     decoded_html = re.sub(r'padding-top:\s*[\d\.]+(pt|px|cm|in);?', 'padding-top: 0 !important;', decoded_html)
     decoded_html = re.sub(r'padding-bottom:\s*[\d\.]+(pt|px|cm|in);?', 'padding-bottom: 0 !important;', decoded_html)
     
-    # --- PHASE 2: THE WRAPPER KILLER (Crucial for Top Gap) ---
-    # Google Docs wraps everything in a class like "c12" with huge padding. 
-    # We force ALL classes to have 0 padding/margin.
-    decoded_html = re.sub(r'\.c\d+\s*{[^}]+}', '', decoded_html) # Nuke Google's class definitions
-    
-    # --- PHASE 3: INLINE INJECTION (For Gmail Compatibility) ---
-    # Gmail ignores <style> blocks for the first element. We must INJECT inline styles.
-    # This regex finds the first H1, H2, or P tag and forces margin:0 on it directly.
+    decoded_html = re.sub(r'\.c\d+\s*{[^}]+}', '', decoded_html)
     decoded_html = re.sub(r'(<(h[1-6]|p)[^>]*>)', r'\1', decoded_html, count=1)
     
-    # We replace the body tag with one that forces zero spacing
     if "<body" in decoded_html:
         decoded_html = re.sub(r'<body[^>]*>', '<body style="margin:0; padding:0; background-color:#ffffff;">', decoded_html)
 
-    # --- PHASE 4: REBUILT CSS (Tight & Clean) ---
     style_fix = """
     <style>
-        /* Global Reset */
         body { margin: 0 !important; padding: 0 !important; }
-        
-        /* Force the very first element to touch the top */
         body > *, body > div > * { margin-top: 0 !important; padding-top: 0 !important; }
-        
-        /* Typography */
-        body, td, p, h1, h2, h3 { 
-            font-family: Arial, Helvetica, sans-serif !important; 
-            color: #000000 !important;
-        }
-        
-        /* Tighten Paragraphs */
+        body, td, p, h1, h2, h3 { font-family: Arial, Helvetica, sans-serif !important; color: #000000 !important; }
         p { margin-bottom: 8px !important; margin-top: 0 !important; }
-        
-        /* Tighten Lists */
         ul, ol { margin-top: 0 !important; margin-bottom: 8px !important; padding-left: 25px !important; }
         li { margin-bottom: 2px !important; }
-        
-        /* Fix the Google Doc "List Paragraph" Bug */
         li p { display: inline !important; margin: 0 !important; }
-        
-        /* Headings */
         h1, h2, h3 { margin-bottom: 10px !important; margin-top: 15px !important; }
-        
-        /* EXCEPT the first heading - kill its top margin */
         h1:first-child, h2:first-child, h3:first-child { margin-top: 0 !important; }
     </style>
     """
     
-    # Prepend our "Super CSS" to the clean HTML
     clean_html = style_fix + decoded_html
-
     docs_service = build('docs', 'v1', credentials=creds)
     doc = docs_service.documents().get(documentId=doc_id).execute()
     return doc.get('title'), clean_html
@@ -148,24 +107,18 @@ def get_full_sheet_data(creds, sheet_id, sheet_name):
     except: return []
 
 def send_mail_html(creds, sender, to, subject, html_body, display_name):
-    """Sends a professional HTML-formatted email using MIMEMultipart."""
     service = build('gmail', 'v1', credentials=creds)
-    
-    # Use MIMEMultipart - this is the standard for HTML emails
     message = MIMEMultipart("alternative")
     message['To'] = to
     message['From'] = formataddr((display_name, sender))
     message['Subject'] = subject
 
-    # Attach the HTML body properly
     msg_html = MIMEText(html_body, "html")
     message.attach(msg_html)
     
-    # Encode and send
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     service.users().messages().send(userId="me", body={'raw': raw}).execute()
 
-# --- NEW INBOX LOGIC ---
 def parse_email_parts(service, user_id, msg_id, parts, attachments, body_html):
     for part in parts:
         mime_type = part.get('mimeType')
@@ -200,7 +153,6 @@ def fetch_all_threads(max_threads_per_account=10):
         
         service = build('gmail', 'v1', credentials=creds)
         
-        # CHANGED: Fetch whole threads from the inbox, ignoring bounces 
         results = service.users().threads().list(userId='me', maxResults=max_threads_per_account, q='in:inbox -from:mailer-daemon').execute()
         threads = results.get('threads', [])
         
@@ -212,14 +164,11 @@ def fetch_all_threads(max_threads_per_account=10):
             thread_messages = []
             vendor_email = "Unknown"
             
-            # Extract data for every single message inside this thread
             for msg in messages:
                 payload = msg['payload']
                 headers = {h['name']: h['value'] for h in payload['headers']}
                 
                 sender = headers.get('From', 'Unknown')
-                
-                # Identify the vendor by finding the first email address that isn't yours
                 if email not in sender:
                     vendor_email = sender
                     
@@ -240,7 +189,6 @@ def fetch_all_threads(max_threads_per_account=10):
                     "Message_ID": msg['id']
                 })
 
-            # Pull the overarching thread info (Subject from first message, ID from last)
             first_headers = {h['name']: h['value'] for h in messages[0]['payload']['headers']}
             last_headers = {h['name']: h['value'] for h in messages[-1]['payload']['headers']}
             
@@ -249,7 +197,7 @@ def fetch_all_threads(max_threads_per_account=10):
                 "Thread_ID": th['id'],
                 "Subject": first_headers.get('Subject', 'No Subject'),
                 "Vendor_Email": vendor_email,
-                "Messages": thread_messages, # We now store the whole conversation array
+                "Messages": thread_messages,
                 "Last_RFC_Message_ID": last_headers.get('Message-ID', '')
             })
             
@@ -268,14 +216,11 @@ def send_inbox_reply(email, thread_id, rfc_message_id, to_address, subject, body
     
     raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
     service.users().messages().send(userId='me', body={'raw': raw_message, 'threadId': thread_id}).execute()
-    
-    # mark as read so it disappears from the unread queue
     service.users().messages().modify(userId='me', id=rfc_message_id, body={'removeLabelIds': ['UNREAD']}).execute()
 
 # --- 2. UI SETUP ---
 st.title("👔 Simple Merge")
 
-# [[[ CHECK FOR LOGIN SUCCESS AT THE VERY TOP ]]]
 if "code" in st.query_params:
     code = st.query_params["code"]
     email_trying = st.query_params.get("state", "Unknown Account")
@@ -287,7 +232,7 @@ if "code" in st.query_params:
         st.success(f"✅ LOGIN SUCCESS FOR: {email_trying}")
         st.warning("⬇️ COPY THIS TOKEN BELOW AND PASTE INTO SECRETS ⬇️")
         st.code(flow.credentials.to_json(), language="json")
-        st.stop() # Stop loading the rest of the app so you focus on copying
+        st.stop()
     except Exception as e:
         st.error(f"Login Error: {str(e)}")
 
@@ -306,7 +251,6 @@ with tab_auth:
         status = "✅ Ready" if creds else "❌ Disconnected"
         col1.write(f"**{email}** : {status}")
         
-        # Always show login button to allow re-auth/refresh
         if col2.button("Login / Refresh", key=f"login_{email}"):
             redirect_uri = "https://mail-merge-app-xuxkqmkhigxrnyoeftbfif.streamlit.app"
             flow = Flow.from_client_config(get_client_config(), SCOPES, redirect_uri=redirect_uri)
@@ -322,24 +266,18 @@ with tab_preview:
             subj, html_body = get_jd_html(creds, st.secrets["DOC_ID"])
             st.info(f"📄 Template: {subj}")
             st.markdown("**Personalized Preview (with HTML formatting):**")
-            # Replace tags in the HTML string
             preview_html = html_body.replace("{first_name}", "John").replace("{company}", "TechCorp").replace("{job_title}", "Analyst")
             st.html(preview_html)
         except Exception as e: st.error(f"Could not load preview: {e}")
     else: st.warning("Connect your first account to preview.")
 
 # --- TAB: OPERATIONS ---
-# --- TAB: OPERATIONS ---
 with tab_run:
     all_acc = json.loads(st.secrets["DUMMY_ACCOUNTS"])
     
     with st.sidebar:
         st.header("⚙️ Configuration")
-        
-        # [NEW] Dynamic Display Name Input
-        # It defaults to secrets, but you can change it on the fly!
         display_name = st.text_input("Send As Name", value=st.secrets.get("DISPLAY_NAME", "Recruitment Team"))
-        
         sel_acc = st.multiselect("Active Senders", all_acc, default=all_acc)
         limit = st.number_input("Max Per Account", 1, 500, 20)
         delay = st.number_input("Round Delay (s)", 5, 600, 20)
@@ -390,7 +328,6 @@ with tab_run:
 
                     try:
                         if not is_dry: 
-                            # CHANGED: Use the 'display_name' variable from the sidebar input
                             send_mail_html(s["creds"], s["email"], target, subj, final_body, display_name)
                         
                         s["idx"] += 1
@@ -398,8 +335,6 @@ with tab_run:
                         dashboard_df.at[s["email"], "Sent"] = s["idx"]
                         dashboard_df.at[s["email"], "Status"] = "✅ Sent"
                     except Exception as e:
-                        # --- ERROR HANDLING FIX ---
-                        # Indented correctly now!
                         error_msg = str(e).split(']')[0] 
                         dashboard_df.at[s["email"], "Status"] = f"❌ {error_msg}"
                         st.error(f"Detailed Error for {s['email']}: {e}")
@@ -435,31 +370,53 @@ with tab_inbox:
     if not emails:
         st.info("No active vendor conversations found.")
     else:
-        # Split layout: List on the left, threaded reader on the right
-        col_list, col_view = st.columns([1, 2.5])
+        # initialize session state to handle active conversation selections
+        if "selected_inbox_idx" not in st.session_state:
+            st.session_state.selected_inbox_idx = 0
+            
+        # safety catch if the inbox list shrinks after a refresh
+        if st.session_state.selected_inbox_idx >= len(emails):
+            st.session_state.selected_inbox_idx = 0
+
+        # expanded left column for multi-line text
+        col_list, col_view = st.columns([1.2, 2.5])
         
         with col_list:
-            selected_index = st.radio(
-                "Conversations", 
-                range(len(emails)),
-                format_func=lambda x: f"{emails[x]['Account'].split('@')[0]}\n↳ {emails[x]['Vendor_Email'][:18]}..."
-            )
+            st.markdown("##### Conversations")
+            # scrollable container so the whole page doesn't stretch down
+            with st.container(height=500, border=False):
+                for i, em in enumerate(emails):
+                    sender = em['Vendor_Email'].split('<')[0].strip()[:25]
+                    subj = em['Subject'][:32]
+                    subj = subj + "..." if len(em['Subject']) > 32 else subj
+                    acc = em['Account'].split('@')[0]
+                    
+                    # strip html tags from the body of the last message to create a clean snippet
+                    last_msg_raw = em['Messages'][-1]['Body']
+                    clean_snippet = re.sub('<[^<]+>', '', last_msg_raw).strip()
+                    snippet = clean_snippet[:40] + "..." if len(clean_snippet) > 40 else clean_snippet
+                    
+                    # \n renders natively as multi-line inside Streamlit buttons
+                    label = f"👤 {sender}\n📄 {subj}\n💬 {snippet}\n📥 {acc}"
+                    
+                    btn_type = "primary" if st.session_state.selected_inbox_idx == i else "secondary"
+                    
+                    if st.button(label, key=f"btn_thread_{em['Thread_ID']}", use_container_width=True, type=btn_type):
+                        st.session_state.selected_inbox_idx = i
+                        st.rerun()
             
-        selected_thread = emails[selected_index]
+        selected_thread = emails[st.session_state.selected_inbox_idx]
         
         with col_view:
             st.markdown(f"### {selected_thread['Subject']}")
             st.caption(f"**Vendor:** `{selected_thread['Vendor_Email']}` | **Via:** `{selected_thread['Account']}`")
             st.divider()
             
-            # The scrollable container that holds the threaded chat
             with st.container(height=500, border=True):
                 for msg in selected_thread["Messages"]:
                     is_me = selected_thread["Account"] in msg["From"]
                     
-                    # Draw a neat box around each individual message in the thread
                     with st.container(border=True):
-                        # Visual indicators for who sent what
                         if is_me:
                             st.markdown(f"🟢 **You** (`{msg['Date']}`)")
                         else:
@@ -482,7 +439,7 @@ with tab_inbox:
                             email=selected_thread["Account"],
                             thread_id=selected_thread["Thread_ID"],
                             rfc_message_id=selected_thread["Last_RFC_Message_ID"],
-                            to_address=selected_thread["Vendor_Email"], # Guaranteed to reply to the vendor, never yourself
+                            to_address=selected_thread["Vendor_Email"],
                             subject=selected_thread["Subject"],
                             body_text=reply_body
                         )
