@@ -6,6 +6,8 @@ import pandas as pd
 import re
 from datetime import datetime
 import base64
+import threading
+from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -185,7 +187,7 @@ def fetch_all_threads(max_threads_per_account=10):
                     "Body": "".join(body_html) if body_html else "No HTML Body",
                     "Attachments": attachments,
                     "Message_ID": msg['id'],
-                    "Snippet": msg.get('snippet', '') # Pulls native API snippet to bypass CSS text leaking
+                    "Snippet": msg.get('snippet', '')
                 })
 
             first_headers = {h['name']: h['value'] for h in messages[0]['payload']['headers']}
@@ -217,7 +219,10 @@ def send_inbox_reply(email, thread_id, rfc_message_id, to_address, subject, body
     service.users().messages().send(userId='me', body={'raw': raw_message, 'threadId': thread_id}).execute()
     service.users().messages().modify(userId='me', id=rfc_message_id, body={'removeLabelIds': ['UNREAD']}).execute()
 
-# --- 2. UI SETUP ---
+# --- 2. UI SETUP & SESSION STATE ---
+if 'campaign_running' not in st.session_state: st.session_state.campaign_running = False
+if 'stop_clicked' not in st.session_state: st.session_state.stop_clicked = False
+
 st.title("👔 Simple Merge")
 
 if "code" in st.query_params:
@@ -236,7 +241,6 @@ if "code" in st.query_params:
         st.error(f"Login Error: {str(e)}")
 
 # --- 3. TABS ---
-if 'stop_clicked' not in st.session_state: st.session_state.stop_clicked = False
 tab_run, tab_preview, tab_auth, tab_inbox = st.tabs(["⚡ Operations", "👁️ Preview", "⚙️ Accounts", "📥 Inbox"])
 
 # --- TAB: ACCOUNTS ---
@@ -270,7 +274,7 @@ with tab_preview:
         except Exception as e: st.error(f"Could not load preview: {e}")
     else: st.warning("Connect your first account to preview.")
 
-# --- TAB: OPERATIONS ---
+# --- TAB: OPERATIONS (BACKGROUND THREADING) ---
 with tab_run:
     all_acc = json.loads(st.secrets["DUMMY_ACCOUNTS"])
     
@@ -283,87 +287,104 @@ with tab_run:
         is_dry = st.toggle("🧪 Dry Run (Safe)", value=True)
 
     col_btn, col_stop = st.columns([1, 4])
-    start = col_btn.button("🔥 LAUNCH", type="primary", use_container_width=True)
-    if col_stop.button("🛑 STOP CAMPAIGN", type="secondary"): st.session_state.stop_clicked = True
+    start = col_btn.button("🔥 LAUNCH", type="primary", use_container_width=True, disabled=st.session_state.campaign_running)
+    if col_stop.button("🛑 STOP CAMPAIGN", type="secondary", disabled=not st.session_state.campaign_running): 
+        st.session_state.stop_clicked = True
 
-    if start:
+    if start and not st.session_state.campaign_running:
         st.session_state.stop_clicked = False
-        active_data = []
-        with st.status("🔍 Checking System...") as status:
+        st.session_state.campaign_running = True
+        
+        with st.status("🔍 Initializing System...") as status:
             admin_creds = load_creds(all_acc[0])
             subj, body_tmpl = get_jd_html(admin_creds, st.secrets["DOC_ID"])
+            active_data = []
             for s in sel_acc:
                 c = load_creds(s)
                 if c:
                     rows = get_full_sheet_data(c, st.secrets["SHEET_ID"], f"filter{all_acc.index(s)}")
                     active_data.append({"email": s, "creds": c, "rows": rows, "idx": 0})
-            status.update(label="System Ready!", state="complete")
+            status.update(label="System Ready! Handing off to background.", state="complete")
 
-        dashboard_df = pd.DataFrame([{"Account": s["email"], "Target": "-", "Sent": 0, "Status": "Ready"} for s in active_data]).set_index("Account")
-        prog_bar = st.progress(0, text="Progress")
-        table_ui = st.empty()
-        
-        total_goal = sum([min(len(s["rows"]), limit) for s in active_data])
-        sent_total = 0
+        st.session_state.active_data = active_data
+        st.session_state.dashboard_df = pd.DataFrame([{"Account": s["email"], "Target": "-", "Sent": 0, "Status": "Ready"} for s in active_data]).set_index("Account")
+        st.session_state.total_goal = sum([min(len(s["rows"]), limit) for s in active_data])
+        st.session_state.sent_total = 0
 
-        for r_num in range(limit):
-            if st.session_state.stop_clicked: break
-            
-            round_active = False
-            for s in active_data:
-                if s["idx"] < len(s["rows"]):
-                    round_active = True
-                    row = s["rows"][s["idx"]]
-                    target = row[0]
-                    comp = row[1] if len(row) > 1 else "Your Company"
-                    role = row[2] if len(row) > 2 else "the open position"
-                    fname = target.split('@')[0].split('.')[0].capitalize()
-                    
-                    final_body = body_tmpl.replace("{first_name}", fname).replace("{company}", comp).replace("{job_title}", role)
-                    
-                    dashboard_df.at[s["email"], "Target"] = target
-                    dashboard_df.at[s["email"], "Status"] = "📨 Sending..."
-                    table_ui.dataframe(dashboard_df, use_container_width=True)
-
-                    try:
-                        if not is_dry: 
-                            send_mail_html(s["creds"], s["email"], target, subj, final_body, display_name)
-                        
-                        s["idx"] += 1
-                        sent_total += 1
-                        dashboard_df.at[s["email"], "Sent"] = s["idx"]
-                        dashboard_df.at[s["email"], "Status"] = "✅ Sent"
-                    except Exception as e:
-                        error_msg = str(e).split(']')[0] 
-                        dashboard_df.at[s["email"], "Status"] = f"❌ {error_msg}"
-                        st.error(f"Detailed Error for {s['email']}: {e}")
-                    
-                    time.sleep(1)
-                    table_ui.dataframe(dashboard_df, use_container_width=True)
-                    prog_bar.progress(sent_total/total_goal, text=f"Sent {sent_total} / {total_goal}")
-
-            if not round_active: break
-            
-            if r_num < limit - 1:
-                human_delay = delay + random.randint(-2, 2)
-                for sec in range(human_delay, 0, -1):
+        def background_campaign(limit, delay, is_dry, display_name, subj, body_tmpl):
+            try:
+                for r_num in range(limit):
                     if st.session_state.stop_clicked: break
-                    for s in active_data: 
-                        if "Auth" not in str(dashboard_df.at[s["email"], "Status"]) and "Error" not in str(dashboard_df.at[s["email"], "Status"]):
-                            dashboard_df.at[s["email"], "Status"] = f"⏳ {sec}s"
-                    table_ui.dataframe(dashboard_df, use_container_width=True)
-                    time.sleep(1)
+                    
+                    round_active = False
+                    for s in st.session_state.active_data:
+                        if s["idx"] < len(s["rows"]):
+                            round_active = True
+                            row = s["rows"][s["idx"]]
+                            target = row[0]
+                            comp = row[1] if len(row) > 1 else "Your Company"
+                            role = row[2] if len(row) > 2 else "the open position"
+                            fname = target.split('@')[0].split('.')[0].capitalize()
+                            
+                            final_body = body_tmpl.replace("{first_name}", fname).replace("{company}", comp).replace("{job_title}", role)
+                            
+                            st.session_state.dashboard_df.at[s["email"], "Target"] = target
+                            st.session_state.dashboard_df.at[s["email"], "Status"] = "📨 Sending..."
 
-        st.balloons()
+                            try:
+                                if not is_dry: 
+                                    send_mail_html(s["creds"], s["email"], target, subj, final_body, display_name)
+                                
+                                s["idx"] += 1
+                                st.session_state.sent_total += 1
+                                st.session_state.dashboard_df.at[s["email"], "Sent"] = s["idx"]
+                                st.session_state.dashboard_df.at[s["email"], "Status"] = "✅ Sent"
+                            except Exception as e:
+                                error_msg = str(e).split(']')[0] 
+                                st.session_state.dashboard_df.at[s["email"], "Status"] = f"❌ {error_msg}"
+                            
+                            time.sleep(1)
+
+                    if not round_active: break
+                    
+                    if r_num < limit - 1:
+                        human_delay = delay + random.randint(-2, 2)
+                        for sec in range(human_delay, 0, -1):
+                            if st.session_state.stop_clicked: break
+                            for s in st.session_state.active_data: 
+                                if "Auth" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]) and "Error" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]):
+                                    st.session_state.dashboard_df.at[s["email"], "Status"] = f"⏳ {sec}s"
+                            time.sleep(1)
+            finally:
+                st.session_state.campaign_running = False
+
+        thread = threading.Thread(target=background_campaign, args=(limit, delay, is_dry, display_name, subj, body_tmpl))
+        add_script_run_ctx(thread)
+        thread.start()
+
+    # Dynamic UI updating for background campaign
+    if st.session_state.campaign_running:
+        st.info("🚀 Campaign is running in the background. You can safely switch to the Inbox tab!")
+        prog = st.session_state.sent_total / max(1, st.session_state.total_goal)
+        st.progress(prog, text=f"Sent {st.session_state.sent_total} / {st.session_state.total_goal}")
+        st.dataframe(st.session_state.dashboard_df, use_container_width=True)
+        time.sleep(2)
+        st.rerun()
+    elif getattr(st.session_state, 'sent_total', 0) > 0 and not st.session_state.stop_clicked:
+        st.success("✅ Campaign Completed!")
+        st.progress(1.0, text=f"Sent {st.session_state.sent_total} / {st.session_state.total_goal}")
+        st.dataframe(st.session_state.dashboard_df, use_container_width=True)
+    elif st.session_state.stop_clicked and hasattr(st.session_state, 'dashboard_df'):
+        st.warning("🛑 Campaign Stopped.")
+        st.dataframe(st.session_state.dashboard_df, use_container_width=True)
+
 
 # --- TAB: INBOX ---
 with tab_inbox:
-    # Set up session state for master-detail view toggle
     if "active_thread_id" not in st.session_state:
         st.session_state.active_thread_id = None
 
     if st.session_state.active_thread_id is None:
-        # --- LIST VIEW (Like Gmail) ---
         c_head, c_btn = st.columns([4, 1])
         c_head.subheader("📥 Unified Vendor Inbox")
         if c_btn.button("🔄 Refresh Inbox", use_container_width=True):
@@ -376,25 +397,21 @@ with tab_inbox:
             st.info("No active vendor conversations found.")
         else:
             st.divider()
-            # Header Row
             h_col1, h_col2, h_col3, h_col4 = st.columns([2, 5, 2, 1])
             h_col1.markdown("**Vendor**")
             h_col2.markdown("**Subject & Preview**")
             h_col3.markdown("**Account**")
             h_col4.markdown("**Action**")
             
-            # Data Rows
             for em in emails:
                 st.markdown("<hr style='margin: 0px; padding: 0px; border-top: 1px solid #ddd;'>", unsafe_allow_html=True)
                 c1, c2, c3, c4 = st.columns([2, 5, 2, 1])
                 
-                # Format text lengths so columns don't break
                 sender = em['Vendor_Email'].split('<')[0].strip()[:20]
                 subj = em['Subject'][:40]
                 acc = em['Account'].split('@')[0]
                 snippet = em['Messages'][-1].get('Snippet', '')[:70]
                 
-                # Use st.markdown with padding to align text vertically with the button
                 c1.markdown(f"<div style='padding-top: 8px;'>👤 {sender}</div>", unsafe_allow_html=True)
                 c2.markdown(f"<div style='padding-top: 8px;'><b>{subj}</b> - <span style='color: gray;'>{snippet}...</span></div>", unsafe_allow_html=True)
                 c3.markdown(f"<div style='padding-top: 8px;'>📥 {acc}</div>", unsafe_allow_html=True)
@@ -406,11 +423,9 @@ with tab_inbox:
             st.markdown("<hr style='margin: 0px; padding: 0px; border-top: 1px solid #ddd;'>", unsafe_allow_html=True)
 
     else:
-        # --- FULL THREAD VIEW ---
         emails = fetch_all_threads()
         selected_thread = next((t for t in emails if t['Thread_ID'] == st.session_state.active_thread_id), None)
         
-        # Failsafe if the thread disappears from the API fetch
         if not selected_thread:
             st.session_state.active_thread_id = None
             st.rerun()
@@ -423,7 +438,6 @@ with tab_inbox:
         st.caption(f"**Vendor:** `{selected_thread['Vendor_Email']}` | **Via:** `{selected_thread['Account']}`")
         st.divider()
         
-        # Thread History rendering
         for msg in selected_thread["Messages"]:
             is_me = selected_thread["Account"] in msg["From"]
             
@@ -436,8 +450,32 @@ with tab_inbox:
                 st.html(msg["Body"])
                 
                 if msg["Attachments"]:
+                    st.markdown("**Attachments:**")
                     for att in msg["Attachments"]:
-                        st.download_button(label=f"📎 {att['filename']}", data=att['data'], file_name=att['filename'], key=f"att_{msg['Message_ID']}")
+                        col_a, col_b = st.columns([3, 1])
+                        with col_a:
+                            st.write(f"📎 `{att['filename']}`")
+                        with col_b:
+                            st.download_button(label="Download", data=att['data'], file_name=att['filename'], key=f"dl_{msg['Message_ID']}_{att['filename']}")
+                        
+                        # --- ATTACHMENT PREVIEW ENGINE ---
+                        with st.expander(f"👁️ Preview {att['filename']}"):
+                            fname_lower = att['filename'].lower()
+                            try:
+                                if fname_lower.endswith('.pdf'):
+                                    base64_pdf = base64.b64encode(att['data']).decode('utf-8')
+                                    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="500" type="application/pdf"></iframe>'
+                                    st.markdown(pdf_display, unsafe_allow_html=True)
+                                elif fname_lower.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
+                                    st.image(att['data'])
+                                elif fname_lower.endswith(('.txt', '.csv', '.xml', '.json', '.md', '.html')):
+                                    st.code(att['data'].decode('utf-8'))
+                                elif fname_lower.endswith(('.docx', '.doc')):
+                                    st.info("Microsoft Word formats (.docx, .doc) cannot be previewed directly in the browser. Please use the download button to view the resume.")
+                                else:
+                                    st.info("Preview not available for this file type. Please use the download button.")
+                            except Exception as e:
+                                st.warning("Could not generate a preview for this file format.")
 
         st.divider()
         st.markdown("#### Quick Reply")
@@ -457,7 +495,7 @@ with tab_inbox:
                 st.success("Reply sent and attached to thread!")
                 time.sleep(1)
                 fetch_all_threads.clear()
-                st.session_state.active_thread_id = None # Kick user back to inbox list on send
+                st.session_state.active_thread_id = None 
                 st.rerun()
             else:
                 st.error("Cannot send an empty message.")
