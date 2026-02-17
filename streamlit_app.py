@@ -4,7 +4,7 @@ import time
 import random
 import pandas as pd
 import re
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import base64
 import threading
 from streamlit.runtime.scriptrunner import add_script_run_ctx
@@ -108,7 +108,6 @@ def get_full_sheet_data(creds, sheet_id, sheet_name):
 
 # --- SENDLOG DEDUPLICATION LOGIC ---
 def get_send_log(creds, sheet_id):
-    """Pulls the master SendLog to prevent duplicates across multiple runs."""
     try:
         sheets = build('sheets', 'v4', credentials=creds)
         res = sheets.spreadsheets().values().get(spreadsheetId=sheet_id, range="SendLog!A:B").execute()
@@ -119,10 +118,11 @@ def get_send_log(creds, sheet_id):
         return set()
 
 def append_to_send_log(creds, sheet_id, target_email, subject, sender_account):
-    """Appends a new record to the SendLog tab."""
     try:
         sheets = build('sheets', 'v4', credentials=creds)
-        timestamp = datetime.now().isoformat()
+        ist_tz = timezone(timedelta(hours=5, minutes=30))
+        timestamp = datetime.now(ist_tz).strftime('%Y-%m-%d %I:%M:%S %p IST')
+        
         body = {'values': [[target_email, subject, sender_account, timestamp]]}
         sheets.spreadsheets().values().append(
             spreadsheetId=sheet_id,
@@ -209,7 +209,6 @@ def fetch_all_threads(max_threads_per_account=10):
                     data = payload['body'].get('data')
                     if data: body_html.append(base64.urlsafe_b64decode(data.encode('UTF-8')).decode('utf-8'))
 
-                # Grabbing internal millisecond timestamp for precise chronological sorting
                 msg_time = msg.get('internalDate', '0')
 
                 thread_messages.append({
@@ -225,7 +224,6 @@ def fetch_all_threads(max_threads_per_account=10):
             first_headers = {h['name']: h['value'] for h in messages[0]['payload']['headers']}
             last_headers = {h['name']: h['value'] for h in messages[-1]['payload']['headers']}
             
-            # Use the most recent message's timestamp to represent the thread's arrival time
             last_msg_time = messages[-1].get('internalDate', '0')
             
             master_inbox.append({
@@ -238,7 +236,6 @@ def fetch_all_threads(max_threads_per_account=10):
                 "Last_RFC_Message_ID": last_headers.get('Message-ID', '')
             })
             
-    # CRITICAL FIX: Sort the entire aggregated list chronologically (Newest first)
     master_inbox.sort(key=lambda x: int(x['Last_Message_Time']), reverse=True)
             
     return master_inbox
@@ -338,7 +335,6 @@ with tab_run:
             admin_creds = load_creds(all_acc[0])
             subj, body_tmpl = get_jd_html(admin_creds, st.secrets["DOC_ID"])
             
-            # Fetch the Master SendLog for deduplication
             st.session_state.sent_history = get_send_log(admin_creds, st.secrets["SHEET_ID"])
             
             active_data = []
@@ -346,7 +342,7 @@ with tab_run:
                 c = load_creds(s)
                 if c:
                     rows = get_full_sheet_data(c, st.secrets["SHEET_ID"], f"filter{all_acc.index(s)}")
-                    active_data.append({"email": s, "creds": c, "rows": rows, "idx": 0})
+                    active_data.append({"email": s, "creds": c, "rows": rows, "idx": 0, "sent_count": 0})
             status.update(label="System Ready! Handing off to background.", state="complete")
 
         st.session_state.active_data = active_data
@@ -356,57 +352,62 @@ with tab_run:
 
         def background_campaign(limit, delay, is_dry, display_name, subj, body_tmpl):
             try:
-                for r_num in range(limit):
+                for s in st.session_state.active_data:
+                    s["sent_count"] = 0
+
+                while True:
                     if st.session_state.stop_clicked: break
                     
                     round_active = False
                     for s in st.session_state.active_data:
-                        if s["idx"] < len(s["rows"]):
-                            round_active = True
+                        # Fast-forward past duplicates without breaking the loop or incrementing sent count
+                        while s["idx"] < len(s["rows"]) and s["sent_count"] < limit:
                             row = s["rows"][s["idx"]]
                             target = row[0].strip()
+                            
+                            if (target, subj) in st.session_state.sent_history:
+                                st.session_state.dashboard_df.at[s["email"], "Status"] = "⏭️ Skipped"
+                                s["idx"] += 1
+                                time.sleep(0.1)
+                                continue 
+                            
+                            round_active = True
                             comp = row[1] if len(row) > 1 else "Your Company"
                             role = row[2] if len(row) > 2 else "the open position"
                             fname = target.split('@')[0].split('.')[0].capitalize()
                             
                             st.session_state.dashboard_df.at[s["email"], "Target"] = target
-                            
-                            # --- SENDLOG DEDUPLICATION LOGIC ---
-                            if (target, subj) in st.session_state.sent_history:
-                                st.session_state.dashboard_df.at[s["email"], "Status"] = "⏭️ Skipped (Already Sent)"
-                                s["idx"] += 1
-                                time.sleep(0.5)
-                                continue 
-                            
-                            final_body = body_tmpl.replace("{first_name}", fname).replace("{company}", comp).replace("{job_title}", role)
                             st.session_state.dashboard_df.at[s["email"], "Status"] = "📨 Sending..."
 
                             try:
                                 if not is_dry: 
+                                    final_body = body_tmpl.replace("{first_name}", fname).replace("{company}", comp).replace("{job_title}", role)
                                     send_mail_html(s["creds"], s["email"], target, subj, final_body, display_name)
                                     append_to_send_log(s["creds"], st.secrets["SHEET_ID"], target, subj, s["email"])
                                     st.session_state.sent_history.add((target, subj))
                                 
                                 s["idx"] += 1
+                                s["sent_count"] += 1
                                 st.session_state.sent_total += 1
-                                st.session_state.dashboard_df.at[s["email"], "Sent"] = s["idx"]
+                                st.session_state.dashboard_df.at[s["email"], "Sent"] = s["sent_count"]
                                 st.session_state.dashboard_df.at[s["email"], "Status"] = "✅ Sent"
                             except Exception as e:
                                 error_msg = str(e).split(']')[0] 
                                 st.session_state.dashboard_df.at[s["email"], "Status"] = f"❌ {error_msg}"
+                                s["idx"] += 1 
                             
                             time.sleep(1)
+                            break 
 
                     if not round_active: break
                     
-                    if r_num < limit - 1:
-                        human_delay = delay + random.randint(-2, 2)
-                        for sec in range(human_delay, 0, -1):
-                            if st.session_state.stop_clicked: break
-                            for s in st.session_state.active_data: 
-                                if "Auth" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]) and "Error" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]) and "Skipped" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]):
-                                    st.session_state.dashboard_df.at[s["email"], "Status"] = f"⏳ {sec}s"
-                            time.sleep(1)
+                    human_delay = delay + random.randint(-2, 2)
+                    for sec in range(human_delay, 0, -1):
+                        if st.session_state.stop_clicked: break
+                        for s in st.session_state.active_data: 
+                            if "Auth" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]) and "Error" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]) and "Skipped" not in str(st.session_state.dashboard_df.at[s["email"], "Status"]):
+                                st.session_state.dashboard_df.at[s["email"], "Status"] = f"⏳ {sec}s"
+                        time.sleep(1)
             finally:
                 st.session_state.campaign_running = False
 
@@ -454,7 +455,6 @@ with tab_inbox:
             st.info("No active vendor conversations found.")
         else:
             st.divider()
-            # Updated to a 5-column layout to fit the Date
             h_col1, h_col2, h_col3, h_col4, h_col5 = st.columns([2, 4, 2, 2, 1])
             h_col1.markdown("**Vendor**")
             h_col2.markdown("**Subject & Preview**")
@@ -471,7 +471,6 @@ with tab_inbox:
                 acc = em['Account'].split('@')[0]
                 snippet = em['Messages'][-1].get('Snippet', '')[:50]
                 
-                # Convert the internal millisecond timestamp to a readable UI date
                 try:
                     timestamp_ms = int(em['Last_Message_Time'])
                     dt_obj = datetime.fromtimestamp(timestamp_ms / 1000.0)
