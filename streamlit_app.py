@@ -324,10 +324,8 @@ with tab_run:
 
     col_btn, col_stop = st.columns([1, 4])
     start = col_btn.button("🔥 LAUNCH", type="primary", use_container_width=True, disabled=st.session_state.campaign_running)
-    
     if col_stop.button("🛑 STOP CAMPAIGN", type="secondary", disabled=not st.session_state.campaign_running): 
         st.session_state.stop_clicked = True
-        st.rerun()
 
     if start and not st.session_state.campaign_running:
         st.session_state.stop_clicked = False
@@ -416,8 +414,6 @@ with tab_run:
         thread = threading.Thread(target=background_campaign, args=(limit, delay, is_dry, display_name, subj, body_tmpl))
         add_script_run_ctx(thread)
         thread.start()
-        
-        st.rerun()
 
     if st.session_state.campaign_running:
         @st.fragment(run_every="2s")
