@@ -10,7 +10,7 @@ st.set_page_config(page_title="Simple Merge", page_icon="👔", layout="wide")
 if 'campaign_running' not in st.session_state: st.session_state.campaign_running = False
 if 'stop_clicked' not in st.session_state: st.session_state.stop_clicked = False
 
-st.title("👔 Simple Merge")
+st.title("Simple Merge")
 
 # Catch OAuth Redirect
 if "code" in st.query_params:
