@@ -11,6 +11,10 @@ from api.docs import get_jd_html
 from api.sheets import get_send_log, get_full_sheet_data, append_to_send_log
 from api.gmail import send_mail_html
 
+# --- CALLBACK FUNCTION ---
+def stop_campaign():
+    st.session_state.stop_clicked = True
+
 def render():
     all_acc = json.loads(st.secrets["DUMMY_ACCOUNTS"])
     
@@ -24,8 +28,9 @@ def render():
 
     col_btn, col_stop = st.columns([1, 4])
     start = col_btn.button("🔥 LAUNCH", type="primary", use_container_width=True, disabled=st.session_state.campaign_running)
-    if col_stop.button("🛑 STOP CAMPAIGN", type="secondary", disabled=not st.session_state.campaign_running): 
-        st.session_state.stop_clicked = True
+    
+    # Updated to use on_click callback instead of if-statement
+    col_stop.button("🛑 STOP CAMPAIGN", type="secondary", disabled=not st.session_state.campaign_running, on_click=stop_campaign)
 
     if start and not st.session_state.campaign_running:
         st.session_state.stop_clicked = False
@@ -114,6 +119,7 @@ def render():
         thread = threading.Thread(target=background_campaign, args=(limit, delay, is_dry, display_name, subj, body_tmpl))
         add_script_run_ctx(thread)
         thread.start()
+        st.rerun() # Forces immediate UI update so buttons correctly toggle
 
     if st.session_state.campaign_running:
         @st.fragment(run_every="2s")
