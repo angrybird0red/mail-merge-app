@@ -1,10 +1,13 @@
 import streamlit as st
 import base64
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from api.gmail import fetch_all_threads, send_inbox_reply
 
 def render():
+    # Define IST offset (UTC + 5:30)
+    IST = timezone(timedelta(hours=5, minutes=30))
+    
     if "active_thread_id" not in st.session_state:
         st.session_state.active_thread_id = None
 
@@ -39,7 +42,8 @@ def render():
                 
                 try:
                     timestamp_ms = int(em['Last_Message_Time'])
-                    dt_obj = datetime.fromtimestamp(timestamp_ms / 1000.0)
+                    # Apply explicit IST timezone
+                    dt_obj = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=IST)
                     formatted_date = dt_obj.strftime("%b %d, %I:%M %p")
                 except:
                     formatted_date = "Unknown"
@@ -72,9 +76,18 @@ def render():
         
         for msg in selected_thread["Messages"]:
             is_me = selected_thread["Account"] in msg["From"]
+            
+            # Format individual messages to IST using Internal_Date
+            try:
+                msg_ts = int(msg['Internal_Date'])
+                msg_dt = datetime.fromtimestamp(msg_ts / 1000.0, tz=IST)
+                msg_date_str = msg_dt.strftime("%b %d, %I:%M %p")
+            except:
+                msg_date_str = msg["Date"]
+                
             with st.container(border=True):
-                if is_me: st.markdown(f"🟢 **You** (`{msg['Date']}`)")
-                else: st.markdown(f"🔵 **Vendor** - {msg['From']} (`{msg['Date']}`)")
+                if is_me: st.markdown(f"🟢 **You** (`{msg_date_str}`)")
+                else: st.markdown(f"🔵 **Vendor** - {msg['From']} (`{msg_date_str}`)")
                 
                 st.html(msg["Body"])
                 
