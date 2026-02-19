@@ -29,7 +29,6 @@ def render():
     col_btn, col_stop = st.columns([1, 4])
     start = col_btn.button("🔥 LAUNCH", type="primary", use_container_width=True, disabled=st.session_state.campaign_running)
     
-    # Updated to use on_click callback instead of if-statement
     col_stop.button("🛑 STOP CAMPAIGN", type="secondary", disabled=not st.session_state.campaign_running, on_click=stop_campaign)
 
     if start and not st.session_state.campaign_running:
@@ -119,13 +118,13 @@ def render():
         thread = threading.Thread(target=background_campaign, args=(limit, delay, is_dry, display_name, subj, body_tmpl))
         add_script_run_ctx(thread)
         thread.start()
-        st.rerun() # Forces immediate UI update so buttons correctly toggle
+        st.rerun()
 
     if st.session_state.campaign_running:
         @st.fragment(run_every="2s")
         def render_campaign_progress():
             if st.session_state.campaign_running:
-                st.info("🚀 Campaign is running in the background. You can safely switch to the Inbox tab!")
+                st.info("🚀 Campaign is running in the background.")
                 prog = st.session_state.sent_total / max(1, st.session_state.total_goal)
                 st.progress(prog, text=f"Sent {st.session_state.sent_total} / {st.session_state.total_goal}")
                 st.dataframe(st.session_state.dashboard_df, use_container_width=True)
